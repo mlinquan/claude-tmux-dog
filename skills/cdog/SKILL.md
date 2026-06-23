@@ -5,7 +5,7 @@ description: Manage Claude Code background agents with cdog (claude-tmux-dog). S
 
 # cdog — Claude Code Process Manager
 
-`cdog` manages Claude Code sessions in detached tmux sessions. No polling, no daemon — uses Claude Code's Hook mechanism for event-driven state.
+`cdog` manages Claude Code sessions in detached tmux sessions. Uses Claude Code's Hook mechanism for event-driven lifecycle management, plus background watcher daemons for autonomous context defense and API error recovery.
 
 ## Quick Reference
 
@@ -52,8 +52,7 @@ A `cdog.json` looks like:
     "max_run": "7d",
     "max_tokens": "1m",
     "api_error_auto_compact": {
-      "threshold": 3,
-      "context_free_threshold": 20
+      "threshold": 3
     },
     "pane_watcher": {
       "compact_ratio": 0.8
@@ -73,10 +72,11 @@ The table shows:
 - **name** — agent name
 - **session** — first 8 chars of session UUID
 - **status** — cdog status (`watching` / `detached`)
-- **claude** — claude process status (`running` / `waiting` / `failed` / `completed` / `stopped`)
+- **claude** — claude process status (`running` / `waiting` / `failed` / `completed` / `stopped` / `failed!`)
+- **auto-nudge** — whether auto-nudge is on or off
+- **context** — `↑ tokens / max_tokens pct%` (from pane watcher)
 - **nudge** — nudge count
 - **↺** — restart count
-- **model** — model label (from config)
 - **uptime** — human-readable uptime
 - **started_at** — start timestamp
 
@@ -182,10 +182,10 @@ cdog tracks **two independent statuses** per agent:
 Configured in `cdog.json`:
 
 - `auto_nudge_stop: true` — on Stop hook, auto-send "continue" so it keeps working
-- `auto_restart: true` — on recoverable StopFailure (rate_limit, overloaded, timeout), auto-kill-Ctrl-C + resume
-- `max_run: "7d"` — auto-stop after max duration (circuit breaker trips after 3 failures in 5 min)
+- `auto_restart: true` — on recoverable StopFailure (rate_limit, overloaded, timeout), auto-run breakToShell + compactOrNudge (compact if context ≥ 80%, else nudge). Circuit breaker trips after 3 failures in 5 min
+- `max_run: "7d"` — stores deadline timestamp; on SessionEnd, if deadline passed, marks `completed` and kills tmux
 - `max_tokens: "1m"` — max context tokens (accepts `200000`, `"200k"`, `"1m"`). Shared by pane_watcher and api_error_auto_compact
-- `api_error_auto_compact` — log watcher: tails claude debug log, classifies API errors (`timeout`/`provider`/`rate_limit`/`unknown`), triggers compact-or-nudge on threshold. Always enabled
+- `api_error_auto_compact` — log watcher: tails claude debug log, classifies API errors (`fatal`/`timeout`/`provider`/`rate_limit`/`unknown`), triggers compact-or-nudge on threshold. `fatal` (model_not_found etc.) stops agent immediately. Always enabled
 - `pane_watcher` — proactive: monitors `↑ tokens` in tmux pane via `pipe-pane`, compacts at 80% before errors happen. Always enabled
 
 ## Dual-Layer Context Defense
@@ -194,7 +194,7 @@ cdog always spawns two detached watcher subprocesses on `cdog start` (always on 
 
 1. **Pane watcher** (proactive, primary defense): uses `tmux pipe-pane` to stream pane output, parses `↑ X.Yk tokens` from claude's TUI status line, compacts at 80% of `max_tokens` *before* API errors happen. Falls back to `capture-pane` polling every 15s if `pipe-pane` is unavailable. No C-c needed — claude is idle when checked.
 
-2. **Log watcher** (reactive, secondary defense): `tail -f` the claude debug log (always passed via `--debug-file`), classifies `[ERROR] API error` lines by type (`timeout`/`provider`/`rate_limit`/`unknown`), triggers compact-or-nudge when the per-kind threshold is reached. Uses marker safety (`cdog-recover` → C-c → check marker) to avoid killing the wrong process.
+2. **Log watcher** (reactive, secondary defense): `tail -f` the claude debug log (always passed via `--debug-file`), classifies `[ERROR] API error` lines by type (`fatal`/`timeout`/`provider`/`rate_limit`/`unknown`), triggers compact-or-nudge when the per-kind threshold is reached. `fatal` errors (model_not_found, authentication_failed) stop the agent immediately. Uses marker safety (`cdog-stop` → C-c → check marker) to avoid killing the wrong process.
 
 **Compact decision:** reads `last_up_tokens` from state (recorded by pane watcher). If `upTokens >= max_tokens * 0.8` → `/compact`. Otherwise → nudge. No `/context` command needed — instant decision based on token data.
 
@@ -210,7 +210,7 @@ Both watchers are killed on `cdog stop` / `cdog delete` and respawned on `cdog r
 {
   "name": "agent-name",                 // required — unique agent identifier
   "cwd": "/path/to/project",            // required — working directory
-  "md": "task.md",                      // task markdown piped into claude on start
+  "md": "task.md",                      // task markdown piped into claude on start (supports comma-separated or array for multiple files)
   "args": ["--dangerously-skip-permissions"],  // extra CLI args
   "log": "./logs/claude-debug.log",     // claude debug log path
   "log_file": "./logs/cdog.log",        // cdog operation log path
