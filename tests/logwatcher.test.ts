@@ -72,7 +72,6 @@ describe('logwatcher.ts', () => {
     describe('provider', () => {
       const cases: [string, string][] = [
         ['503', '503 Service Unavailable'],
-        ['model_not_found', '503 model_not_found: model not available'],
         ['upstream error', '500 upstream error: bad gateway'],
         ['no available channel', 'no available channel for model'],
         ['overloaded_error', 'overloaded_error: model is busy'],
@@ -83,6 +82,21 @@ describe('logwatcher.ts', () => {
       cases.forEach(([name, line]) => {
         it(`classifies "${name}" as provider`, () => {
           expect(classifyApiError(line)).toBe('provider');
+        });
+      });
+    });
+
+    describe('fatal', () => {
+      const cases: [string, string][] = [
+        ['model_not_found', '503 503 {"error":{"code":"model_not_found","message":"No avai'],
+        ['model_not_found simple', 'model_not_found: model not available'],
+        ['authentication_failed', 'authentication_failed: invalid key'],
+        ['billing_error', 'billing_error: quota exceeded'],
+      ];
+
+      cases.forEach(([name, line]) => {
+        it(`classifies "${name}" as fatal`, () => {
+          expect(classifyApiError(line)).toBe('fatal');
         });
       });
     });
@@ -111,6 +125,15 @@ describe('logwatcher.ts', () => {
     });
 
     describe('priority / ordering', () => {
+      it('fatal takes priority over provider', () => {
+        // model_not_found + 503 → fatal (model offline, not just busy)
+        expect(classifyApiError('503 model_not_found')).toBe('fatal');
+      });
+
+      it('fatal takes priority over rate_limit', () => {
+        expect(classifyApiError('rate_limit model_not_found')).toBe('fatal');
+      });
+
       it('rate_limit takes priority over provider', () => {
         // If a line mentions both rate_limit and 503, rate_limit wins
         expect(classifyApiError('503 rate_limit')).toBe('rate_limit');
@@ -143,6 +166,10 @@ describe('logwatcher.ts', () => {
     it('returns false for rate_limit', () => {
       expect(shouldIntervene('rate_limit')).toBe(false);
     });
+
+    it('returns false for fatal (stop, do not compact)', () => {
+      expect(shouldIntervene('fatal')).toBe(false);
+    });
   });
 
   describe('interveneThreshold', () => {
@@ -172,6 +199,10 @@ describe('logwatcher.ts', () => {
       it('returns null for rate_limit', () => {
         expect(interveneThreshold('rate_limit', defaultThreshold)).toBe(null);
       });
+
+      it('returns null for fatal (stop immediately, never compact)', () => {
+        expect(interveneThreshold('fatal', defaultThreshold)).toBe(null);
+      });
     });
 
     describe('with fast-path (high token count)', () => {
@@ -197,6 +228,10 @@ describe('logwatcher.ts', () => {
 
       it('still returns null for rate_limit even with high tokens', () => {
         expect(interveneThreshold('rate_limit', defaultThreshold, highTokens, maxTokens)).toBe(null);
+      });
+
+      it('still returns null for fatal even with high tokens', () => {
+        expect(interveneThreshold('fatal', defaultThreshold, highTokens, maxTokens)).toBe(null);
       });
     });
 

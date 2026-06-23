@@ -14,12 +14,12 @@ A Claude Code process manager and inter-agent message bus. Starts long-running C
 | 1 | **Zero-polling** | Claude Code hooks (`Stop` / `StopFailure` / `SessionStart` / `SessionEnd`) push events to cdog. No loop, no timer, no filesystem watcher |
 | 2 | **Dual-track status** | Independent statuses for the Claude process (hook-driven: `running` / `waiting` / `failed` / `completed`) and cdog monitoring (command-driven: `watching` / `detached`). `cdog stop` never kills the process |
 | 3 | **Auto-nudge** | On every `Stop` hook, auto-send a configurable prompt (e.g. `"continue"`) so the agent keeps working autonomously — like a hands-free loop |
-| 4 | **Auto-recovery** | On recoverable `StopFailure` (rate limit, overloaded, timeout, server error), runs a **cdog-recover** flow: Ctrl-C + `/new` + `--resume`. Circuit breaker trips after 3 failures in 5 minutes |
+| 4 | **Auto-recovery** | On recoverable `StopFailure` (rate limit, overloaded, timeout, server error), runs a **cdog-recover** flow: Ctrl-C + `compactOrNudge` (compact if context ≥ 80%, else nudge). Circuit breaker trips after 3 failures in 5 minutes |
 | 5 | **Dual-layer context defense** | **Pane watcher** (proactive): monitors `↑ tokens` in the tmux pane via `pipe-pane`, compacts at 80% before errors happen. **Log watcher** (reactive): tails the claude debug log, classifies API errors by type, triggers compact-or-nudge on threshold. Compact completion detected via `PostCompact` hook — no hardcoded delays |
 | 6 | **API error classification** | Errors are classified as `timeout` / `provider` / `rate_limit` / `unknown` with per-kind thresholds. `overloaded_error` → provider (not context). Provider/rate_limit errors never compact — they let claude retry |
 | 7 | **State sharing** | Pane watcher records `last_up_tokens` to state; log watcher reads it on the first API error for a fast-path (threshold → 1 if tokens ≥ 70% of max) |
 | 8 | **Message relaying** | `cdog message send` sends arbitrary text to a running agent's tmux pane, with optional `--from` attribution and `--reply-method` for building reply chains |
-| 9 | **Auto-shutdown** | `max_run` schedules an internal timer that gracefully stops the agent at a deadline (e.g. `"7d"`). No cron, no at — in-process ms timeout |
+| 9 | **Auto-shutdown** | `max_run` stores a deadline timestamp; on `SessionEnd`, if the deadline has passed, the agent is marked `completed` and the tmux session is killed. No cron, no at — passive check on hook event |
 | 10 | **Auto-init** | `cdog start` auto-runs `cdog init` if hooks are missing from `~/.claude/settings.json` (hooks can get reset by claude updates) |
 | 11 | **Isolated tmux sessions** | Each agent gets its own tmux session, fully separated. tmux requires no daemonization — it survives parent process exit |
 | 12 | **Built-in logging** | Optional agent-level operation logs and Claude debug logs, tailable via `cdog log` with follow/name-filter/all/claude-log modes |
@@ -35,19 +35,23 @@ A Claude Code process manager and inter-agent message bus. Starts long-running C
    - **Pane watcher** (proactive): uses `tmux pipe-pane` to stream pane output, parses `↑ X.Yk tokens` from claude's TUI status line, and compacts at 80% of `max_tokens` *before* errors happen. Falls back to `capture-pane` polling every 15s if `pipe-pane` is unavailable
    - **Log watcher** (reactive): `tail -f` the claude debug log, classifies `[ERROR] API error` lines by type, and triggers compact-or-nudge when the per-kind threshold is reached
 5. **Command separation** — `cdog stop` does not kill Claude; it flips cdog to `detached` and ignores all hooks. `cdog restart` flips back to `watching`. Only `cdog delete` kills the tmux session
-6. **Recovery flow** — on recoverable error, cdog types a `cdog-recover` marker, sends Ctrl-C, checks if the marker survived, then runs `/new` + `claude --resume <session_id>` in the same tmux pane
+6. **Recovery flow** — on recoverable error, cdog types a `cdog-recover` marker, sends Ctrl-C, checks if the marker survived, then runs `compactOrNudge` (reads `last_up_tokens` from state → `/compact` if ≥ 80% of max, otherwise sends prompt nudge)
 
 ## Installation
 
 ```bash
-# from this repo
-npm install -g .
+# from npm
+npm install claude-tmux-dog -g
+# or
+pnpm install claude-tmux-dog -g
+# or
+yarn global add claude-tmux-dog
 
 # one-time setup: create ~/.cdog/ and wire hooks into ~/.claude/settings.json
 cdog init
 ```
 
-`cdog init` copies hook scripts to `~/.cdog/hooks/` and appends `StopFailure` / `SessionStart` / `SessionEnd` hook config to `~/.claude/settings.json` (a `.cdog.bak` backup is written first).
+`cdog init` copies hook scripts to `~/.cdog/hooks/` and wires `Stop` / `StopFailure` / `SessionStart` / `SessionEnd` / `PreCompact` / `PostCompact` hook config into `~/.claude/settings.json` (a `.cdog.bak` backup is written first).
 
 ## Project config (`cdog.json`)
 
@@ -142,10 +146,11 @@ Tails the claude debug log for `[ERROR] API error` lines, classifies them, and t
 
 | Kind | Matches | Threshold | Action |
 |------|---------|-----------|--------|
-| `timeout` | `timed out`, `524`, `TTFB`, `no response headers` | `max(threshold * 2, 6)` | C-c → /context → compact-or-nudge |
-| `provider` | `503`, `model_not_found`, `upstream error`, `overloaded_error`, `访问量过大` | never | Let claude retry; notify at 8 errors |
-| `rate_limit` | `rate_limit`, `公平使用`, `429` | never | Let claude retry; notify at 8 errors |
-| `unknown` | (unclassified) | `threshold` (default 3) | C-c → /context → compact-or-nudge |
+| `fatal` | `model_not_found`, `authentication_failed`, `billing_error` | immediate | **Stop agent** — C-c (marker technique) → mark `failed` → kill tmux → kill watchers → notify |
+| `timeout` | `timed out`, `524`, `TTFB`, `no response headers` | `max(threshold * 2, 6)` | C-c → breakToShell → compact-or-nudge |
+| `provider` | `503`, `upstream error`, `no available channel`, `overloaded_error`, `访问量过大`, `稍后再试` | never | Let claude retry; notify on every error |
+| `rate_limit` | `rate_limit`, `公平使用`, `frequency`, `429` | never | Let claude retry; notify on every error |
+| `unknown` | (unclassified) | `threshold` (default 3) | C-c → breakToShell → compact-or-nudge |
 
 > **Note:** `overloaded_error` in the API response means the *model* is overloaded (provider-side), NOT that the context window is full. A full context window typically shows up as `unknown` + "Request timed out", not as `overloaded_error`.
 
@@ -159,8 +164,8 @@ Monitors the tmux pane for claude's TUI status line `↑ X.Yk tokens` and compac
 |-----|---------|-------------|
 | `max_tokens` | `watchdog.max_tokens` | Override max tokens for the pane watcher only. Normally set `watchdog.max_tokens` instead |
 | `compact_ratio` | `0.8` | Compact when `↑ tokens >= max_tokens * compact_ratio` (80% by default) |
-| `interval` | `30` | Poll interval in seconds (fallback mode only; pipe-pane is event-driven) |
-| `prompt` | `watchdog.prompt` | Text sent after `/compact` (10s delay, no C-c needed — claude is idle) |
+| `interval` | `30` | Poll interval in seconds (fallback mode only; pipe-pane is event-driven). Note: currently hardcoded to 15s in fallback mode |
+| `prompt` | `watchdog.prompt` | Text sent after `/compact` completes (detected via `PostCompact` hook — no hardcoded delay, no C-c needed — claude is idle) |
 
 The pane watcher also persists `last_up_tokens` to state, which the log watcher reads on the first API error for the fast-path threshold.
 
@@ -205,7 +210,7 @@ The pane watcher also persists `last_up_tokens` to state, which the log watcher 
 
 | Command | Description |
 | --- | --- |
-| `cdog start [name\|all]` | Start an agent in a detached tmux session. Auto-runs `cdog init` if hooks are missing |
+| `cdog start [config_path\|all]` | Start an agent from a config path (default: `./cdog.json`). Auto-runs `cdog init` if hooks are missing |
 | `cdog stop <name\|all>` | **Detach** cdog — stop monitoring, Claude keeps running untouched. Kills both watchers |
 | `cdog restart <name\|all>` | **Re-watch** a detached agent. Never kills the Claude process. Respawns watchers |
 | `cdog delete <name\|all>` | Kill the tmux session and remove the agent from state. Kills both watchers |
@@ -247,8 +252,13 @@ cdog has three recovery paths, all sharing the same `breakToShell` + `compactOrN
 When Claude Code hits an API error it fires the `StopFailure` hook → `cdog notify` → cdog:
 
 1. Finds the agent by `session_id`
-2. If the error is recoverable (`rate_limit`, `overloaded`, `server_error`, `timeout`, …) and the circuit breaker hasn't tripped, types a `cdog-recover` marker, sends Ctrl-C, waits 1s, checks whether the marker survived, then runs `/new` + `claude --resume <session_id>` in the same tmux pane
-3. If the error is non-recoverable (`authentication_failed`, `billing_error`, …) or the circuit breaker trips (≥3 failures in 5 minutes), marks the agent `failed` and stops restarting
+2. Classifies the error type:
+   - **Fatal** (`authentication_failed`, `billing_error`, `model_not_found`, `oauth_org_not_allowed`) → mark `failed`, no recovery
+   - **Transient** (`rate_limit`, `overloaded`, `server_error`, `max_output_tokens`) → `breakToShell` + `compactOrNudge`
+   - **Context-suspect** (`invalid_request`, `unknown`) → `breakToShell` + `compactOrNudge`, with escalation by failure count
+3. If recoverable and the circuit breaker hasn't tripped: types a `cdog-recover` marker, sends Ctrl-C, waits for shell prompt, checks whether the marker survived, then runs `compactOrNudge` (reads `last_up_tokens` from state → `/compact` if ≥ 80% of max, otherwise sends prompt nudge)
+4. If the tmux session is dead: spawns a new tmux session with `claude --resume <session_id>` (with `cat <md>` if configured)
+5. If the error is non-recoverable or the circuit breaker trips (≥3 failures in 5 minutes), marks the agent `failed` and stops restarting
 
 ### 2. Log-watcher-driven recovery (API error threshold)
 
@@ -312,20 +322,27 @@ This prevents C-c from killing an unrelated foreground process (e.g. if claude a
 ```
 StopFailure
 ↓
+Classify error → fatal / transient / context-suspect
+↓
+(if recoverable & circuit breaker not tripped)
 tmux send-keys -l "cdog-recover" (no Enter — marker stays on input line)
 tmux send-keys C-c
-sleep 1
+↓
+Wait for shell prompt (poll pane for $, %, #)
 ↓
 Read tmux pane content
-├─ Marker survived (Ctrl-C only cleared the error, shell line intact)
-│  → Ctrl-U clears marker
-│  → /new → cat <md> (if config has md)
+├─ Marker survived (C-c only cleared the error, shell line intact)
+│  → C-u clears marker
 │
-├─ Marker lost (Ctrl-C cleared the whole shell line)
-│  → /new → cat <md> (if config has md)
+├─ Marker lost (C-c cleared the whole shell line)
+│  → C-u clears residual input
 │
 └─ tmux session is dead
    → tmux new-session ... claude --resume <session_id> (with cat <md>)
+↓
+compactOrNudge: read state.last_up_tokens
+├─ upTokens >= maxTokens * 0.8 → /compact (context likely full)
+├─ upTokens < 0.8 or unknown   → send prompt nudge (safer default)
 ```
 
 `SessionStart` marks an agent `running`; `SessionEnd` marks it `stopped`/`failed` (ignoring `compact`/`resume`).
@@ -378,7 +395,7 @@ npm run dev        # run via tsx without building
 
 ## Skill Integration
 
-This repository comes with a skill definition at `skills/cdog/`. Any AI agent can use this skill. When `claude-tmux-dog` is installed globally (`npm install -g .`) and the skill is loaded, the agent can manage background cdog agents without leaving the conversation. The skill frontmatter:
+This repository comes with a skill definition at `skills/cdog/`. Any AI agent can use this skill. When `claude-tmux-dog` is installed globally (`npm install claude-tmux-dog -g`) and the skill is loaded, the agent can manage background cdog agents without leaving the conversation. The skill frontmatter:
 
 ```markdown
 ---

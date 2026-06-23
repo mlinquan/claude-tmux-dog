@@ -23,6 +23,8 @@ import type { AgentState, CdogConfig } from './types.js';
 import { loadState, mutateAgent } from './state.js';
 import { loadConfig } from './config.js';
 import { tmuxHasSession, sleep, parseTokenCount } from './util.js';
+import { tmux, tmuxSendKey, tmuxCapturePane, tmuxSendText } from './util.js';
+import { killPaneWatcher } from './panewatcher.js';
 import {
   breakToShell,
   compactOrNudge,
@@ -68,17 +70,20 @@ export const SUCCESS_RE = /Stream started - received first chunk|\[API REQUEST\]
 // not as an API error with overloaded_error type.
 export type ApiErrorKind =
   | 'timeout'        // TTFB timeout, 524 Cloudflare timeout
-  | 'provider'        // 503 model_not_found, 500 upstream, overloaded_error
+  | 'provider'        // 503, upstream error, overloaded_error (model busy)
   | 'rate_limit'     // 500 rate_limit / fair use
+  | 'fatal'          // model_not_found, authentication_failed — model offline, stop immediately
   | 'unknown';       // unclassified — check context then decide
 
 /** Classify an API error line from the log. */
 export function classifyApiError(line: string): ApiErrorKind {
+  // Fatal: model_not_found means the model is offline — stop immediately
+  if (/model_not_found|authentication_failed|billing_error/i.test(line)) return 'fatal';
   // Rate limit
   if (/rate.?limit|公平使用|frequency|429/i.test(line)) return 'rate_limit';
-  // Provider errors: 503 model_not_found, upstream error, overloaded_error (model busy)
+  // Provider errors: 503, upstream error, overloaded_error (model busy)
   // NOTE: overloaded_error = "该模型当前访问量过大" = provider overloaded, NOT context full
-  if (/503|model_not_found|upstream error|no available channel|overloaded_error|访问量过大|稍后再试/i.test(line)) return 'provider';
+  if (/503|upstream error|no available channel|overloaded_error|访问量过大|稍后再试/i.test(line)) return 'provider';
   // Transient timeouts: TTFB, 524 Cloudflare, "Request timed out"
   if (/timed out|524|TTFB|no response headers/i.test(line)) return 'timeout';
   return 'unknown';
@@ -88,6 +93,7 @@ export function classifyApiError(line: string): ApiErrorKind {
 export function shouldIntervene(kind: ApiErrorKind): boolean {
   // unknown + timeout trigger intervention (check context then compact-or-nudge).
   // provider/rate_limit are better left to claude's own retry — compact won't help.
+  // fatal (model_not_found etc.) → stop immediately, no intervention.
   // timeout is included because consecutive timeouts often indicate a full context
   // window (large request body → slow upload → TTFB timeout / 524 Proxy Read Timeout).
   return kind === 'unknown' || kind === 'timeout';
@@ -111,9 +117,9 @@ export function interveneThreshold(
   lastUpTokens?: number | null,
   maxTokens?: number,
 ): number | null {
+  // fatal (model_not_found etc.) → stop immediately, never compact
   // provider and rate_limit never benefit from compact — skip regardless of token count.
-  // (503 model_not_found / 500 rate_limit are provider-side issues, not context issues)
-  if (kind === 'provider' || kind === 'rate_limit') return null;
+  if (kind === 'fatal' || kind === 'provider' || kind === 'rate_limit') return null;
 
   // Fast-path: if pane watcher recorded high tokens (>= 70% of max), act on first error.
   // A large context is the most likely cause of unknown/timeout errors, so compact
@@ -384,7 +390,14 @@ export async function runLogWatcher(agentName: string): Promise<void> {
             recoverChild.unref();
           }
         } else {
-          // provider / rate_limit → don't C-c, let claude retry.
+          // fatal / provider / rate_limit → don't compact.
+          if (kind === 'fatal') {
+            // model_not_found / authentication_failed → model is offline, stop immediately
+            writeWatcherLog(agentName, `FATAL error (${kind}): stopping agent — model offline`);
+            handleFatalError(agentName, trimmed);
+            return; // watcher exits after fatal
+          }
+          // provider / rate_limit → let claude retry.
           // Notification already sent above (on every API error).
           transientNotifyCount++;
           writeWatcherLog(agentName, `transient error (${transientNotifyCount}x ${kind}), letting claude retry`);
@@ -416,6 +429,70 @@ function writeWatcherLog(agentName: string, message: string): void {
   try {
     logAgentEvent(agentName, `logwatcher: ${message}`);
   } catch { /* best effort */ }
+}
+
+/**
+ * Handle a fatal API error (model_not_found, authentication_failed, etc.).
+ *
+ * Stops the agent immediately using the marker technique:
+ *   1. Type "cdog-stop" marker (no Enter — stays on input line).
+ *   2. Send C-c to interrupt claude.
+ *   3. Check if marker survived:
+ *      - Marker gone → C-c took effect (claude interrupted/killed). Done.
+ *      - Marker still there → C-c didn't work. C-u to clear marker.
+ *   4. Mark agent as `failed` with fatal_error reason.
+ *   5. Kill tmux session.
+ *   6. Kill pane watcher (this log watcher exits via return).
+ *   7. Send desktop notification.
+ *
+ * No anti-nudge needed — fatal errors don't trigger Stop hook (claude is killed, not stopped).
+ */
+function handleFatalError(agentName: string, errorLine: string): void {
+  const state = loadState()[agentName];
+  if (!state) return;
+
+  const tmuxSession = state.tmux_session ?? agentName;
+  const MARKER = 'cdog-stop';
+
+  // 1-3. Marker technique: type marker, C-c, check if it survived
+  if (tmuxHasSession(tmuxSession)) {
+    try {
+      tmuxSendText(tmuxSession, MARKER, false); // no Enter — marker stays on input line
+      tmuxSendKey(tmuxSession, 'C-c');
+      sleep(500);
+      const pane = tmuxCapturePane(tmuxSession, 10);
+      if (!pane.includes(MARKER)) {
+        // Marker gone → C-c took effect (claude interrupted/killed). Done.
+      } else {
+        // Marker survived → C-c didn't work. C-u to clear marker, then proceed to kill.
+        tmuxSendKey(tmuxSession, 'C-u');
+      }
+    } catch { /* best effort */ }
+  }
+
+  // 4. Mark failed with reason
+  try {
+    mutateAgent(agentName, (a) => {
+      a.claude_status = 'failed';
+      a.cdog_status = 'detached';
+      a.stop_reason = 'failed';
+      a.fatal_error = errorLine.slice(0, 200);
+      a.failed_at = new Date().toISOString();
+      a.ended_at = new Date().toISOString();
+    });
+  } catch { /* best effort */ }
+
+  // 5. Kill tmux session
+  if (tmuxHasSession(tmuxSession)) {
+    try { tmux(['kill-session', '-t', tmuxSession]); } catch { /* best effort */ }
+  }
+
+  // 6. Kill pane watcher (this log watcher exits via return)
+  killPaneWatcher(agentName);
+
+  // 7. Notify
+  notify(agentName, 'agent-failed', agentName,
+    `FATAL: model offline — ${errorLine.slice(0, 120)}`).catch(() => {});
 }
 
 // ============================================================

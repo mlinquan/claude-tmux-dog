@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cdog — Claude Code process manager (tmux + hooks, no polling, no daemon). v2
+// cdog — Claude Code process manager (tmux + hooks + watcher daemons). v2
 
 import { startCommand, startAll } from './commands/start.js';
 import { stopCommand, stopAll } from './commands/stop.js';

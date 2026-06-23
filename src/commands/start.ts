@@ -112,6 +112,8 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
     cdog_status: 'watching',
     stop_reason: null,
     ended_at: null,
+    fatal_error: null,
+    failed_at: null,
     started_at: localISO(),
     last_error: null,
     last_restart_at: null,

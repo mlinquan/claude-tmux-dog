@@ -182,6 +182,10 @@ export interface AgentState {
   stop_reason: 'stopped' | 'failed' | 'completed' | null;
   /** ISO timestamp when the claude process ended. null while running. */
   ended_at: string | null;
+  /** Fatal error message (e.g. model_not_found) that caused immediate stop. null if no fatal error. */
+  fatal_error: string | null;
+  /** ISO timestamp when a fatal error was detected. null if no fatal error. */
+  failed_at: string | null;
   /** ISO timestamp when the agent was started. */
   started_at: string;
   last_error: string | null;

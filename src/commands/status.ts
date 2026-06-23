@@ -60,6 +60,11 @@ function printTable(): void {
       claude = 'stopped';
       cdog = 'detached';
     }
+    // Show fatal indicator in table when model offline
+    let claudeDisplay = colorClaudeStatus(claude);
+    if (a.fatal_error && claude === 'failed') {
+      claudeDisplay = ANSI.red('failed!');
+    }
     const up = claude === 'running' || claude === 'failed' || claude === 'completed'
       ? uptimeFrom(a.started_at)
       : '–';
@@ -81,7 +86,7 @@ function printTable(): void {
       a.name,
       ANSI.dim(sess),
       colorCdogStatus(cdog),
-      colorClaudeStatus(claude),
+      claudeDisplay,
       autoNudge,
       context,
       ANSI.dim(String(a.nudge_count ?? 0)),
@@ -138,6 +143,12 @@ function printDetail(name: string): void {
     let reason: string = a.stop_reason;
     if (a.stop_reason === 'completed' && a.max_run_deadline) reason = 'completed (max_run reached)';
     console.log(row('Stop reason:', reason));
+  }
+  if (a.fatal_error) {
+    console.log(row('Fatal error:', ANSI.red(a.fatal_error)));
+  }
+  if (a.failed_at) {
+    console.log(row('Failed at:', formatTime(a.failed_at, fmt)));
   }
   console.log(row('PID:', a.pid ? String(a.pid) : '—'));
   if (a.model) console.log(row('Model:', a.model));
