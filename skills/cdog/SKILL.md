@@ -1,11 +1,14 @@
 ---
 name: cdog
-description: Manage Claude Code background agents with cdog (claude-tmux-dog). Start/stop/restart a cdog agent, check status, view logs, send messages, nudge agents to continue working, compact agent context. Dual-layer context defense (pane watcher + log watcher) auto-compacts before API errors. Use when user mentions "cdog", "claude-tmux-dog", "tmux agent", "background agent", or asks to start/stop/manage a long-running Claude Code session.
+description: Manage Claude Code background agents with cdog (claude-tmux-dog) — 24/7 unattended operation (auto-nudge, auto-recovery, proactive context compaction) plus a tmux-native cross-agent message bus. Start/stop/restart a cdog agent, check status, view logs, send messages between agents, nudge agents to continue working, compact agent context. Dual-layer context defense (pane watcher + log watcher) auto-compacts before API errors. Use when user mentions "cdog", "claude-tmux-dog", "tmux agent", "background agent", "long-running agent", "24/7 agent", or asks to start/stop/manage a long-running Claude Code session, send messages between agents, or keep an agent running autonomously.
 ---
 
-# cdog — Claude Code Process Manager
+# cdog — Claude Code Process Manager & Message Bus
 
-`cdog` manages Claude Code sessions in detached tmux sessions. Uses Claude Code's Hook mechanism for event-driven lifecycle management, plus background watcher daemons for autonomous context defense and API error recovery.
+`cdog` does two things:
+
+1. **24/7 unattended operation** — Hook-driven lifecycle management + dual-layer context defense keeps a Claude Code agent running autonomously for days. Auto-nudges on Stop, auto-recovers from API errors, proactively compacts before context overflows.
+2. **tmux-native message bus** — Each agent runs in its own tmux session. `cdog message send` injects text into the pane, giving you cross-agent communication with no broker, no daemon — tmux IS the bus.
 
 ## Quick Reference
 
