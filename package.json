@@ -1,7 +1,7 @@
 {
   "name": "claude-tmux-dog",
-  "version": "0.2.2",
-  "description": "24/7 unattended Claude agents + tmux-native message bus. Auto-nudge, auto-recovery, proactive compaction — keep agents running autonomously for days.",
+  "version": "0.2.1",
+  "description": "Claude Code process manager and inter-agent message bus. Event-driven hooks + background watcher daemons for autonomous agent orchestration.",
   "type": "module",
   "bin": {
     "cdog": "dist/cli.js"
