@@ -145,7 +145,7 @@ function printDetail(name: string): void {
   console.log(row('claude:', colorClaudeStatus(claude) + claudeNote));
   if (claude !== 'running' && claude !== 'starting' && a.stop_reason) {
     let reason: string = a.stop_reason;
-    if (a.stop_reason === 'completed' && a.max_run_deadline) reason = 'completed (max_run reached)';
+    if (a.stop_reason === 'completed' && a.per_watch_deadline) reason = 'completed (per_watch_duration reached)';
     console.log(row('Stop reason:', reason));
   }
   if (a.fatal_error) {

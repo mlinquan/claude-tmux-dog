@@ -44,7 +44,7 @@ export interface ResolvedPaneWatcherConfig {
 
 export function resolvePaneWatcherConfig(cfg: CdogConfig, _hasLog = false): ResolvedPaneWatcherConfig {
   const pw = cfg.watchdog?.pane_watcher;
-  const prompt = pw?.prompt ?? cfg.watchdog?.prompt ?? DEFAULT_PROMPT;
+  const prompt = cfg.watchdog?.prompt ?? DEFAULT_PROMPT;
   // pane_watcher.max_tokens overrides watchdog.max_tokens (rarely needed)
   const maxTokens = parseTokenCount(pw?.max_tokens) || parseTokenCount(cfg.watchdog?.max_tokens) || DEFAULT_MAX_TOKENS;
   const compactRatio = pw?.compact_ratio ?? DEFAULT_COMPACT_RATIO;
@@ -147,7 +147,9 @@ async function fileHasContent(path: string): Promise<boolean> {
 async function runPipeMode(agentName: string, session: string, pipeFile: string, cfg: ResolvedPaneWatcherConfig): Promise<void> {
   // -n 50: start by reading the last 50 lines so we catch the current token
   // count immediately, instead of waiting for the next TUI redraw.
-  const tail = spawn('tail', ['-f', '-n', '50', pipeFile], { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+  // NOT detached: stays in the pane-watcher's process group so
+  // `process.kill(-watcherPid)` reaches it (prevents orphan accumulation).
+  const tail = spawn('tail', ['-f', '-n', '50', pipeFile], { stdio: ['ignore', 'pipe', 'ignore'] });
 
   let buffer = '';
   let lastTokens: number | null = null;
@@ -218,10 +220,19 @@ function handleTokens(
   lastCompactAt: number,
   setLastCompactAt: (t: number) => void,
 ): void {
-  // Persist token count to state (for log watcher cross-reference)
+  // Persist token count to state. Only advance last_up_tokens_at when the
+  // context ACTUALLY changed (delta >= 100 tokens or 1% of max), not on every
+  // TUI redraw with jitter. This keeps the timestamp a reliable "last real
+  // activity" signal for the stall watchdog's cross-check in logwatcher.ts.
+  const prevTokens = loadState()[agentName]?.last_up_tokens ?? null;
+  const delta = prevTokens !== null ? Math.abs(upTokens - prevTokens) : upTokens;
+  const deltaThreshold = Math.max(100, Math.round(cfg.maxTokens * 0.01));
+  const meaningfulChange = prevTokens === null || delta >= deltaThreshold;
   mutateAgent(agentName, (a) => {
     a.last_up_tokens = upTokens;
-    a.last_up_tokens_at = new Date().toISOString();
+    if (meaningfulChange) {
+      a.last_up_tokens_at = new Date().toISOString();
+    }
   });
 
   // Skip if a compact is already in progress (waiting for PostCompact hook)

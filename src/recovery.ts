@@ -13,6 +13,7 @@
 // in state before sending /compact; the PostCompact hook handler in notify.ts
 // reads those fields and sends the nudge.
 
+import { execFileSync } from 'node:child_process';
 import { tmuxSendKey, tmuxSendText, tmuxCapturePane, tmux, sleep } from './util.js';
 import { loadState, mutateAgent } from './state.js';
 
@@ -28,12 +29,46 @@ export const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish', 'dash']);
 /** Claude liveness, inferred from the pane's current command. */
 export type Liveness = 'claude' | 'shell' | 'dead';
 
+/**
+ * Check if a process (by PID) has a descendant named 'claude' or 'node'.
+ * Used when the pane's top-level process is a shell — we need to look into
+ * the shell's children to see if claude is running inside it.
+ */
+function hasClaudeDescendant(pid: number): boolean {
+  try {
+    // pgrep -P <pid> lists direct children. Recursively walk one level deep.
+    const out = execFileSync('pgrep', ['-P', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (!out) return false;
+    const childPids = out.split('\n').filter(Boolean);
+    for (const cp of childPids) {
+      // ps -o comm= -p <pid> gives the command name (without args).
+      const comm = execFileSync('ps', ['-o', 'comm=', '-p', cp], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().toLowerCase();
+      if (comm === 'claude' || comm === 'node') return true;
+      // Recursively check grandchildren (one level is usually enough, but be thorough).
+      if (hasClaudeDescendant(parseInt(cp, 10))) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function detectLiveness(tmuxSession: string): Liveness {
-  const cmd = tmux(['list-panes', '-t', tmuxSession, '-F', '#{pane_current_command}'])
-    .trim()
-    .toLowerCase();
+  // Get both the command name and the PID of the pane's top-level process.
+  const raw = tmux(['list-panes', '-t', tmuxSession, '-F', '#{pane_current_command} #{pane_pid}']);
+  const parts = raw.trim().split(/\s+/);
+  const cmd = (parts[0] || '').toLowerCase();
+  const pid = parseInt(parts[1] || '0', 10);
+
+  // Top-level is claude/node → definitely running.
   if (cmd === 'claude' || cmd === 'node') return 'claude';
-  if (SHELLS.has(cmd)) return 'shell';
+
+  // Top-level is a shell → check if the shell has a claude/node child.
+  if (SHELLS.has(cmd) && pid > 0) {
+    return hasClaudeDescendant(pid) ? 'claude' : 'shell';
+  }
+
+  // Unknown command — treat as shell (conservative).
   return 'shell';
 }
 

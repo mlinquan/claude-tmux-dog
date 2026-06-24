@@ -27,8 +27,10 @@ Usage:
   cdog restart <name|all>              Re-watch a detached agent (never kills claude)
   cdog delete <name|all>                Kill tmux session (if any) + remove from state
   cdog status [name]                    pm2-style table, or detail for one
-  cdog log [name] [--all] [--no-follow] [--claude-log] [--lines N]
-                                        Tail cdog logs (default: follow all)
+  cdog log [name] [--all|--cdog|--claude] [--no-follow] [--lines N] [--err]
+                                        Tail logs: default/--all = cdog+claude;
+                                        --cdog = cdog op-logs; --claude = claude debug;
+                                        --err = only [ERROR] lines
   cdog message send --to <name> --message <text> [--from <from>] [--reply-method <rm>]
                                         Send a message + Enter to an agent
   cdog nudge <name|all> [text]          Nudge an agent (send prompt + Enter). Manual counterpart
@@ -48,7 +50,9 @@ Examples:
   cdog nudge snow-agent            # send "continue" (or config.prompt)
   cdog nudge snow-agent keep going # send "keep going"
   cdog message send --to snow-agent --message "status?" --from "hermes"
-  cdog log snow-agent --no-follow --lines 100`);
+  cdog log snow-agent --no-follow --lines 100
+  cdog log --claude --err               # all agents, claude [ERROR] lines only
+  cdog log snow-agent --all             # snow-agent: cdog + claude merged`);
   process.exit(0);
 }
 
@@ -126,15 +130,17 @@ async function main(): Promise<void> {
     case 'logs': {
       const { positional, bools, values } = parseArgs(rest, {
         valueFlags: new Set(['lines']),
-        boolFlags: new Set(['all', 'no-follow', 'claude-log', 'follow']),
+        boolFlags: new Set(['all', 'no-follow', 'follow', 'claude-log', 'claude', 'cdog', 'err']),
       });
-      const name = positional[0];
-      const isAll = bools.has('all') || (!name && positional.length === 0);
+      const positionalName = positional[0];
+      // "all" or no positional → all agents; otherwise single agent.
+      const name = positionalName && positionalName !== ALL_KEYWORD ? positionalName : undefined;
       await logCommand({
         name,
-        all: isAll,
+        cdog: bools.has('cdog'),
+        claude: bools.has('claude') || bools.has('claude-log'),
+        err: bools.has('err'),
         noFollow: bools.has('no-follow'),
-        claudeLog: bools.has('claude-log'),
         lines: values.lines ? parseInt(values.lines, 10) : undefined,
       });
       break;

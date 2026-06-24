@@ -13,7 +13,9 @@ import { formatTime, namePrefix, plainNamePrefix, DEFAULT_TIMEFORMAT } from './u
 
 /**
  * Append a cdog operation-log line for an agent.
- * Format: `[name]            | YYYY-MM-DD HH:mm:ss message`
+ * Format: `[name]            | <ISO-8601> message`
+ * The timestamp is written as raw ISO-8601 (UTC, sortable, unambiguous);
+ * `cdog log` reformats it to the agent's `timeformat` at display time.
  * No-op if the agent has no `log_file_path` configured.
  */
 export function logAgentEvent(name: string, message: string): void {
@@ -27,8 +29,8 @@ export function logAgentEvent(name: string, message: string): void {
   } catch {
     /* ignore */
   }
-  const ts = formatTime(Date.now(), agent.timeformat || DEFAULT_TIMEFORMAT);
-  // Plain line for the file (no ANSI): fixed-width [name] (26 chars) + | + ts + msg
+  const ts = new Date().toISOString();
+  // Plain line for the file (no ANSI): fixed-width [name] (26 chars) + | + ISO + msg
   const prefix = plainNamePrefix(name);
   const line = `${prefix}| ${ts} ${message}\n`;
   try {
@@ -38,7 +40,8 @@ export function logAgentEvent(name: string, message: string): void {
   }
 }
 
-/** Also echo the colored line to stderr (so it doesn't pollute stdout pipelines). */
+/** Also echo the colored line to stderr (so it doesn't pollute stdout pipelines).
+ *  The stderr echo uses the agent's display `timeformat` (not the on-disk ISO). */
 export function logAndEcho(name: string, message: string): void {
   logAgentEvent(name, message);
   const agent = loadState()[name];

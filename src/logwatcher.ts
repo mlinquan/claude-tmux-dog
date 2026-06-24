@@ -19,10 +19,11 @@
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
+import dayjs from 'dayjs';
 import type { AgentState, CdogConfig } from './types.js';
 import { loadState, mutateAgent } from './state.js';
 import { loadConfig, buildRecoverCommand } from './config.js';
-import { tmuxHasSession, sleep, parseTokenCount } from './util.js';
+import { tmuxHasSession, sleep, parseTokenCount, parseDuration } from './util.js';
 import { tmux, tmuxSendKey, tmuxSendText } from './util.js';
 import { killPaneWatcher } from './panewatcher.js';
 import {
@@ -38,15 +39,19 @@ import { notify } from './notify.js';
 const DEFAULT_THRESHOLD = 3;
 const RECOVER_COOLDOWN_MS = 60_000; // min interval between recovery triggers
 const QUOTA_NUDGE_DELAY_SEC = 30; // wait 30s after quota reset before nudging
+const DEFAULT_STALL_TIMEOUT_MS = 5 * 60_000; // no real activity for 5min → stall
+const DEFAULT_STALL_COOLDOWN_MS = 10 * 60_000; // cooldown after stall-triggered nudge
 
 // ---- API error line regex ----
 // Matches: 2026-06-22T19:40:41.805Z [ERROR] API error (attempt 1/11): ...
 export const API_ERROR_RE = /\[ERROR\]\s+API error/;
 
 // ---- Quota reset time parser ----
-// Matches: "It will reset at 2026-06-24 07:07:31 +0800 CST"
-// Also matches without timezone suffix: "It will reset at 2026-06-24 07:07:31"
-export const QUOTA_RESET_RE = /reset at (\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?)/i;
+// Matches English: "It will reset at 2026-06-24 07:07:31 +0800 CST"
+// Matches English: "It will reset at 2026-06-24 07:07:31"
+// Matches Chinese: "您的限额将在 2026-06-24 17:41:17 重置"
+// Matches Chinese: "将在 2026-06-24 17:41:17 重置"
+export const QUOTA_RESET_RE = /(?:reset at|将在)\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\s+[+-]\d{4})?)/i;
 
 /**
  * Parse quota reset time from an API error line.
@@ -54,9 +59,15 @@ export const QUOTA_RESET_RE = /reset at (\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?
  *
  * Example input:
  *   "429 AccountQuotaExceeded ... It will reset at 2026-06-24 07:07:31 +0800 CST ..."
+ *   "...您的限额将在 2026-06-24 22:18:49 重置..."
  *
- * The timezone offset in the message is "+0800" (no colon), which JS Date doesn't
- * parse natively. We normalize it to "+08:00" for ISO 8601 compatibility.
+ * The timezone offset in the message is "+0800" (no colon), which dayjs doesn't
+ * parse natively. We normalize it to "+08:00" first.
+ *
+ * Uses dayjs for explicit local-time parsing (new Date has ES5/ES6 timezone
+ * ambiguity on timezone-less ISO strings). Strings without a timezone offset are
+ * parsed as the provider's local time (= cdog host local time, by default UTC+8
+ * for Chinese providers).
  */
 export function parseQuotaResetTime(line: string): Date | null {
   const match = line.match(QUOTA_RESET_RE);
@@ -64,10 +75,10 @@ export function parseQuotaResetTime(line: string): Date | null {
   let raw = match[1].trim();
   // Normalize timezone: "+0800" → "+08:00", "-0500" → "-05:00"
   raw = raw.replace(/([+-])(\d{2})(\d{2})$/, '$1$2:$3');
-  // Parse as local time if no timezone present
-  const dt = new Date(raw);
-  if (isNaN(dt.getTime())) return null;
-  return dt;
+  // dayjs parses no-timezone strings as local time (explicit, unlike new Date)
+  const dt = dayjs(raw);
+  if (!dt.isValid()) return null;
+  return dt.toDate();
 }
 
 // ---- Successful response indicators (resets error counter) ----
@@ -105,14 +116,21 @@ export type ApiErrorKind =
 
 /** Classify an API error line from the log. */
 export function classifyApiError(line: string): ApiErrorKind {
+  // Provider capacity/routing errors (temporary, self-recovers): classify FIRST.
+  // new-api gateway returns 503 with code=model_not_found + "no available channel"
+  // — this is a temporary capacity/routing issue, NOT the model being permanently
+  // offline. Must be checked before the model_not_found fatal check below.
+  // Concurrent limit exceeded is also a temporary capacity issue (too many parallel
+  // requests), not a quota limit — should be provider, not rate_limit.
+  if (/no available channel|new_api_error|no available model|Concurrent limit exceeded/i.test(line)) return 'provider';
   // Fatal: model_not_found / authentication_failed / billing_error / oauth_org_not_allowed
   // → model offline or auth issue, stop immediately
   if (/model_not_found|authentication_failed|billing_error|oauth_org_not_allowed/i.test(line)) return 'fatal';
-  // Rate limit
+  // Rate limit (quota exceeded, not concurrent)
   if (/rate.?limit|公平使用|frequency|429/i.test(line)) return 'rate_limit';
   // Provider errors: 503, upstream error, overloaded_error (model busy)
   // NOTE: overloaded_error = "该模型当前访问量过大" = provider overloaded, NOT context full
-  if (/503|upstream error|no available channel|overloaded_error|访问量过大|稍后再试/i.test(line)) return 'provider';
+  if (/503|upstream error|overloaded_error|访问量过大|稍后再试/i.test(line)) return 'provider';
   // Transient timeouts: TTFB, 524 Cloudflare, "Request timed out"
   if (/timed out|524|TTFB|no response headers/i.test(line)) return 'timeout';
   return 'unknown';
@@ -209,6 +227,12 @@ export interface ResolvedAutoCompactConfig {
   prompt: string;
   /** Max context tokens (from watchdog.max_tokens or default 200000). Used for compact decision. */
   maxTokens: number;
+  /** rate_limit two-hit confirmation window in minutes. Default 10. */
+  rateLimitConfirmMinutes: number;
+  /** Stall detection: no real activity for this long → breakToShell + nudge. Default 5min. */
+  stallTimeoutMs: number;
+  /** Cooldown after a stall-triggered nudge. Default 10min. */
+  stallCooldownMs: number;
 }
 
 /**
@@ -220,12 +244,15 @@ export interface ResolvedAutoCompactConfig {
  */
 export function resolveAutoCompactConfig(cfg: CdogConfig, _hasLog = false): ResolvedAutoCompactConfig {
   const ac = cfg.watchdog?.api_error_auto_compact;
-  const prompt = ac?.prompt ?? cfg.watchdog?.prompt ?? DEFAULT_PROMPT;
+  const prompt = cfg.watchdog?.prompt ?? DEFAULT_PROMPT;
   return {
     enabled: true,
     threshold: ac?.threshold ?? DEFAULT_THRESHOLD,
     prompt,
     maxTokens: parseTokenCount(cfg.watchdog?.max_tokens) || 200_000,
+    rateLimitConfirmMinutes: ac?.rate_limit_confirm_minutes ?? 10,
+    stallTimeoutMs: parseDuration(cfg.watchdog?.stall_timeout) || DEFAULT_STALL_TIMEOUT_MS,
+    stallCooldownMs: parseDuration(cfg.watchdog?.stall_cooldown) || DEFAULT_STALL_COOLDOWN_MS,
   };
 }
 
@@ -316,6 +343,55 @@ export async function runLogWatcher(agentName: string): Promise<void> {
   // (30s window per agent+event). This is the "just an on/off switch" approach.
   let transientNotifyCount = 0;
 
+  // ---- Stall watchdog ----
+  // A single setTimeout that resets on every real activity (SUCCESS_RE match:
+  // tool_dispatch_start / [API REQUEST] / Stream started). If it fires (no real
+  // activity for stallTimeoutMs), claude is stuck (Wibbling but no output) →
+  // breakToShell + nudge. Cooldown (stallCooldownMs) prevents nudge loops.
+  // No state persistence, no extra polling — the timer itself is the detector.
+  let stallWatchdog: NodeJS.Timeout | null = null;
+  let lastStallAt = 0;
+  const armStallWatchdog = (): void => {
+    if (stallWatchdog) clearTimeout(stallWatchdog);
+    stallWatchdog = setTimeout(() => {
+      stallWatchdog = null;
+      const now = dayjs().valueOf();
+      if (now - lastStallAt < acConfig.stallCooldownMs) {
+        // Still in cooldown — re-arm and wait
+        writeWatcherLog(agentName, `stall timer fired but in cooldown (${Math.round((acConfig.stallCooldownMs - (now - lastStallAt)) / 60_000)}min left), re-arming`);
+        armStallWatchdog();
+        return;
+      }
+      lastStallAt = now;
+      // Cross-check with the pane watcher: if it recorded real token activity
+      // (last_up_tokens_at) within the stall window, Claude IS working — the
+      // debug-log tail is likely blind (e.g. rotation), not actually stalled.
+      // Suppress the nudge so we don't interrupt real work, and re-arm.
+      const cs = loadState()[agentName];
+      if (cs) {
+        const lastTokensAt = cs.last_up_tokens_at ? dayjs(cs.last_up_tokens_at).valueOf() : 0;
+        const tokenAge = now - lastTokensAt;
+        if (lastTokensAt > 0 && tokenAge < acConfig.stallTimeoutMs) {
+          writeWatcherLog(agentName, `stall timer fired but pane-watcher saw token activity ${Math.round(tokenAge / 1000)}s ago — log tail may be blind, suppressing nudge`);
+          armStallWatchdog();
+          return;
+        }
+      }
+      writeWatcherLog(agentName, `STALL detected: no real activity for ${Math.round(acConfig.stallTimeoutMs / 60_000)}min, breakToShell + nudge`);
+      // A stall kicks claude with a nudge, so notify as 'nudge' (plays nudge.mp3),
+      // NOT 'api-error' — claude is idle/stuck, not failing.
+      notify(agentName, 'nudge', agentName, `Stall detected (no activity ${Math.round(acConfig.stallTimeoutMs / 60_000)}min) — nudging`).catch(() => {});
+      const session = loadState()[agentName]?.tmux_session ?? agentName;
+      if (tmuxHasSession(session)) {
+        breakToShell(session)
+          .then(() => nudgeAgentFromWatcher(agentName, session))
+          .catch(() => nudgeAgentFromWatcher(agentName, session));
+      }
+      // Re-arm so we keep watching after the nudge
+      armStallWatchdog();
+    }, acConfig.stallTimeoutMs);
+  };
+
   // Restore unknown counter from state (for restart persistence).
   let initialUnknown = agent.api_error_count ?? 0;
   if (initialUnknown > 0) errorCounters.set('unknown', initialUnknown);
@@ -335,10 +411,16 @@ export async function runLogWatcher(agentName: string): Promise<void> {
 
   logAgentEvent(agentName, `logwatcher: started watching ${logPath} (threshold=${threshold}, unknown=${initialUnknown})`);
 
-  // tail -f the log file (detached so killLogWatcher can kill the whole group)
-  const tail = spawn('tail', ['-f', '-n', '0', logPath], {
+  // Arm the stall watchdog at startup so a startup-stuck agent is caught even
+  // before the first real activity line. Subsequent SUCCESS_RE matches reset it.
+  armStallWatchdog();
+
+  // tail -F the log file. -F (uppercase) follows by NAME, so it reopens the
+  // file when Claude rotates it (rename → .log.1, new .log created) — prevents
+  // the watcher from going blind after rotation. NOT detached: the tail stays
+  // in the watcher's process group so `process.kill(-watcherPid)` reaches it.
+  const tail = spawn('tail', ['-F', '-n', '0', logPath], {
     stdio: ['ignore', 'pipe', 'ignore'],
-    detached: true,
   });
 
   let buffer = '';
@@ -354,11 +436,14 @@ export async function runLogWatcher(agentName: string): Promise<void> {
 
       // Successful API activity → reset ALL counters
       if (SUCCESS_RE.test(trimmed)) {
+        armStallWatchdog(); // real activity → reset stall watchdog
         if (errorCounters.size > 0 || transientNotifyCount > 0) {
           errorCounters.clear();
           transientNotifyCount = 0;
           persistCounter(agentName, 0);
         }
+        // Clear rate_limit first-at on recovery (claude self-healed)
+        clearRateLimitFirstAt(agentName);
         continue;
       }
 
@@ -392,7 +477,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
 
           if (count >= kindThreshold) {
             // Check cooldown, detached state, and compact-in-progress before triggering
-            const now = Date.now();
+            const now = dayjs().valueOf();
             const state = loadState()[agentName];
             if (!state) { process.exit(0); }
             if (state.cdog_status === 'detached') {
@@ -403,7 +488,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
               writeWatcherLog(agentName, `${kind} threshold reached but compact in progress, skipping`);
               continue;
             }
-            const lastRecover = state.last_recover_at ? new Date(state.last_recover_at).getTime() : 0;
+            const lastRecover = state.last_recover_at ? dayjs(state.last_recover_at).valueOf() : 0;
             if (now - lastRecover < RECOVER_COOLDOWN_MS) {
               writeWatcherLog(agentName, `${kind} threshold reached but in cooldown, skipping`);
               continue;
@@ -428,32 +513,56 @@ export async function runLogWatcher(agentName: string): Promise<void> {
             handleFatalError(agentName, trimmed).catch(() => {});
             return; // watcher exits after fatal
           }
-          // Check for quota exceeded with reset time → breakToShell + schedule nudge
-          // breakToShell stops claude's retry loop (C-c → claude exits to shell),
-          // then scheduleQuotaNudge waits for reset_time + 30s to nudge/resume.
+          // Check for quota exceeded with reset time → two-hit confirmation
+          // First rate_limit: record timestamp + breakToShell + nudge.
+          // Second rate_limit within confirm window: real quota exceeded → scheduleQuotaNudge.
           if (kind === 'rate_limit') {
             const resetTime = parseQuotaResetTime(trimmed);
-            if (resetTime) {
-              const tmuxSession = currentState?.tmux_session ?? agentName;
-              if (tmuxHasSession(tmuxSession)) {
-                writeWatcherLog(agentName, `quota exceeded, breaking to shell before scheduling nudge`);
-                breakToShell(tmuxSession).then(() => {
-                  // Mark claude as pending (waiting for quota reset)
-                  mutateAgent(agentName, (a) => {
-                    a.claude_status = 'pending';
-                  });
-                  scheduleQuotaNudge(agentName, resetTime, trimmed);
-                }).catch(() => {
-                  mutateAgent(agentName, (a) => {
-                    a.claude_status = 'pending';
-                  });
-                  scheduleQuotaNudge(agentName, resetTime, trimmed);
-                });
-              } else {
+            const tmuxSession = currentState?.tmux_session ?? agentName;
+            const confirmMinutes = acConfig.rateLimitConfirmMinutes;
+            const firstAt = currentState?.rate_limit_first_at ?? null;
+
+            if (!firstAt) {
+              // ── First rate_limit trigger ──
+              rateLimitFirstHit(agentName, tmuxSession, 'no prior record');
+            } else {
+              // ── Non-first rate_limit trigger ──
+              const deltaMs = dayjs().valueOf() - dayjs(firstAt).valueOf();
+              const confirmMs = confirmMinutes * 60_000;
+
+              if (deltaMs < confirmMs) {
+                // Within confirm window → real quota exceeded
+                writeWatcherLog(agentName, `rate_limit confirmed (delta=${Math.round(deltaMs / 60_000)}min < ${confirmMinutes}min), scheduling quota nudge`);
+                // Clear first_at (for accurate future tracking after recovery)
                 mutateAgent(agentName, (a) => {
-                  a.claude_status = 'pending';
+                  a.rate_limit_first_at = null;
                 });
-                scheduleQuotaNudge(agentName, resetTime, trimmed);
+                if (resetTime) {
+                  // Execute existing logic: breakToShell + mark pending + scheduleQuotaNudge
+                  const schedulePending = (): void => {
+                    mutateAgent(agentName, (a) => {
+                      a.claude_status = 'pending';
+                    });
+                    scheduleQuotaNudge(agentName, resetTime, trimmed);
+                  };
+                  if (tmuxHasSession(tmuxSession)) {
+                    breakToShell(tmuxSession).then(schedulePending).catch(schedulePending);
+                  } else {
+                    schedulePending();
+                  }
+                } else {
+                  // No reset time parsed — just breakToShell + nudge
+                  if (tmuxHasSession(tmuxSession)) {
+                    breakToShell(tmuxSession)
+                      .then(() => nudgeAgentFromWatcher(agentName, tmuxSession))
+                      .catch(() => nudgeAgentFromWatcher(agentName, tmuxSession));
+                  } else {
+                    nudgeAgentFromWatcher(agentName, tmuxSession);
+                  }
+                }
+              } else {
+                // Outside confirm window → treat as new first hit
+                rateLimitFirstHit(agentName, tmuxSession, `delta=${Math.round(deltaMs / 60_000)}min >= ${confirmMinutes}min`);
               }
             }
           }
@@ -468,6 +577,7 @@ export async function runLogWatcher(agentName: string): Promise<void> {
   });
 
   tail.on('exit', () => {
+    if (stallWatchdog) clearTimeout(stallWatchdog);
     process.exit(0);
   });
 
@@ -489,6 +599,59 @@ function writeWatcherLog(agentName: string, message: string): void {
   try {
     logAgentEvent(agentName, `logwatcher: ${message}`);
   } catch { /* best effort */ }
+}
+
+/** Clear rate_limit_first_at from state (on SUCCESS_RE or quota nudge recovery). */
+function clearRateLimitFirstAt(agentName: string): void {
+  try {
+    mutateAgent(agentName, (a) => {
+      if (a.rate_limit_first_at !== null && a.rate_limit_first_at !== undefined) {
+        a.rate_limit_first_at = null;
+      }
+    });
+  } catch { /* best effort */ }
+}
+
+/**
+ * Nudge agent from logwatcher: resolve prompt from config, send it,
+ * increment nudge_count. Self-contained (no clearQuotaNudge, unlike nudgeCommand).
+ */
+function nudgeAgentFromWatcher(agentName: string, tmuxSession: string): void {
+  const state = loadState()[agentName];
+  let prompt = DEFAULT_PROMPT;
+  try {
+    if (state?.config_path) {
+      const cfg = loadConfig(state.config_path);
+      prompt = cfg.watchdog?.prompt ?? DEFAULT_PROMPT;
+    }
+  } catch { /* best effort */ }
+  try {
+    tmuxSendText(tmuxSession, prompt, true);
+    mutateAgent(agentName, (a) => {
+      a.nudge_count = (a.nudge_count ?? 0) + 1;
+    });
+    writeWatcherLog(agentName, `nudge #${(loadState()[agentName]?.nudge_count ?? 0)} ("${prompt}")`);
+  } catch (e) {
+    writeWatcherLog(agentName, `nudge failed: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * First-hit action for rate_limit two-hit confirmation:
+ * record timestamp, break to shell, nudge once.
+ */
+function rateLimitFirstHit(agentName: string, tmuxSession: string, reason: string): void {
+  writeWatcherLog(agentName, `rate_limit first hit (${reason}), recording timestamp + breakToShell + nudge`);
+  mutateAgent(agentName, (a) => {
+    a.rate_limit_first_at = dayjs().toISOString();
+  });
+  if (tmuxHasSession(tmuxSession)) {
+    breakToShell(tmuxSession)
+      .then(() => nudgeAgentFromWatcher(agentName, tmuxSession))
+      .catch(() => nudgeAgentFromWatcher(agentName, tmuxSession));
+  } else {
+    nudgeAgentFromWatcher(agentName, tmuxSession);
+  }
 }
 
 /**
@@ -523,8 +686,8 @@ async function handleFatalError(agentName: string, errorLine: string): Promise<v
       a.cdog_status = 'detached';
       a.stop_reason = 'failed';
       a.fatal_error = errorLine;
-      a.failed_at = new Date().toISOString();
-      a.ended_at = new Date().toISOString();
+      a.failed_at = dayjs().toISOString();
+      a.ended_at = dayjs().toISOString();
     });
   } catch { /* best effort */ }
 
@@ -562,6 +725,8 @@ export function clearQuotaNudge(agentName: string): void {
       if (a.claude_status === 'pending') {
         a.claude_status = 'running';
       }
+      // Clear rate_limit first-at on recovery
+      a.rate_limit_first_at = null;
     });
   } catch { /* best effort */ }
 }
@@ -583,10 +748,10 @@ function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: strin
     return;
   }
 
-  const now = Date.now();
-  const resetMs = resetTime.getTime();
+  const now = dayjs().valueOf();
+  const resetMs = dayjs(resetTime).valueOf();
   const waitMs = Math.max(0, resetMs - now) + QUOTA_NUDGE_DELAY_SEC * 1000;
-  const resetLocal = resetTime.toLocaleString();
+  const resetLocal = dayjs(resetTime).format('YYYY-MM-DD HH:mm:ss');
 
   if (waitMs <= QUOTA_NUDGE_DELAY_SEC * 1000) {
     // Reset time already passed — nudge soon (just the delay)
@@ -597,7 +762,7 @@ function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: strin
   }
 
   // Record next nudge time in state for status display
-  const nudgeAt = new Date(now + waitMs);
+  const nudgeAt = dayjs(now + waitMs);
   try {
     mutateAgent(agentName, (a) => {
       a.next_nudge_at = nudgeAt.toISOString();
@@ -634,9 +799,7 @@ function scheduleQuotaNudge(agentName: string, resetTime: Date, errorLine: strin
     try {
       if (state.config_path) {
         cfg = loadConfig(state.config_path);
-        prompt = cfg.watchdog?.api_error_auto_compact?.prompt
-          ?? cfg.watchdog?.prompt
-          ?? DEFAULT_PROMPT;
+        prompt = cfg.watchdog?.prompt ?? DEFAULT_PROMPT;
       }
     } catch { /* best effort */ }
 
@@ -708,7 +871,7 @@ export async function recoverFromApiErrors(agentName: string): Promise<void> {
 
   // Mark recovering timestamp (used for cooldown)
   mutateAgent(agentName, (a) => {
-    a.last_recover_at = new Date().toISOString();
+    a.last_recover_at = dayjs().toISOString();
   });
 
   const session = agent.tmux_session;

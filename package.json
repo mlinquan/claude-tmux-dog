@@ -1,6 +1,6 @@
 {
   "name": "claude-tmux-dog",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Claude Code process manager and inter-agent message bus. Event-driven hooks + background watcher daemons for autonomous agent orchestration.",
   "type": "module",
   "bin": {

@@ -5,20 +5,42 @@
 //   - auto_nudge_stop off + interactive on → ask user "Nudge?" (block until
 //     response/timeout); on action/timeout → send prompt; on close → no-op.
 //   - auto_nudge_stop off + interactive off → no-op.
+//
+// Per-watch duration check: if deadline reached, stop nudge, kill watchers,
+// mark completed, but keep tmux alive (claude context preserved).
 
 import type { StopEvent } from '../types.js';
 import { mutateAgent } from '../state.js';
-import { tmuxHasSession, tmuxSendText } from '../util.js';
+import { tmuxHasSession, tmuxSendText, localISO } from '../util.js';
 import { logAgentEvent } from '../logger.js';
 import { notify, notifyInteractive } from '../notify.js';
 import { findBySession, reloadConfig, resolvePrompt } from './shared.js';
 import { clearQuotaNudge } from '../logwatcher.js';
+import { killLogWatcher } from '../logwatcher.js';
+import { killPaneWatcher } from '../panewatcher.js';
 
 export async function handleStop(ev: StopEvent): Promise<void> {
   const agent = findBySession(ev.session_id);
   if (!agent) return;
   if (agent.cdog_status !== 'watching') return;
   if (!tmuxHasSession(agent.tmux_session)) return;
+
+  // Per-watch duration check: if deadline reached, stop nudging
+  if (agent.per_watch_deadline && Date.now() >= agent.per_watch_deadline) {
+    logAgentEvent(agent.name, `Stop → per_watch_duration reached, stopping auto-nudge`);
+    // Kill watchers (stop monitoring)
+    killLogWatcher(agent.name);
+    killPaneWatcher(agent.name);
+    // Mark completed but keep tmux alive
+    mutateAgent(agent.name, (a) => {
+      a.claude_status = 'completed';
+      a.cdog_status = 'detached';
+      a.stop_reason = 'completed';
+      a.ended_at = localISO();
+    });
+    await notify(agent.name, 'max-run-reached', agent.name, `per_watch_duration reached → completed (tmux kept alive)`);
+    return; // don't nudge
+  }
 
   if (agent.claude_status !== 'running') {
     logAgentEvent(agent.name, `Stop → claude_status was ${agent.claude_status}, marking running (user-recovered)`);

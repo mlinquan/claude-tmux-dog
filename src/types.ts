@@ -87,10 +87,17 @@ export interface NotifyConfig {
 }
 
 export interface WatchdogConfig {
-  /** Text sent on each Stop hook when `auto_nudge_stop` is true. Default "continue". */
+  /** Text sent on each nudge (auto_nudge_stop, compact recovery, quota nudge). Default "continue". */
   prompt?: string;
-  /** Max run time, e.g. "7d"/"4h". Agent auto-stops (status `completed`) on SessionEnd check. */
-  max_run?: string;
+  /** Monitor duration, e.g. "7d"/"4h". Each start/restart resets the deadline; on SessionEnd, if passed → completed. */
+  per_watch_duration?: string;
+  /**
+   * Stall detection: if no real activity (tool_dispatch / API REQUEST / Stream started)
+   * for this duration, breakToShell + nudge. Default "5m".
+   */
+  stall_timeout?: string;
+  /** Cooldown after a stall-triggered nudge before another can fire. Default "10m". */
+  stall_cooldown?: string;
   /**
    * Max context tokens for the model (e.g. 200000 for Claude Sonnet).
    * Accepts number or human string: 200000, "200k", "1m".
@@ -129,8 +136,13 @@ export interface WatchdogConfig {
 export interface ApiErrorAutoCompactConfig {
   /** Consecutive API errors before triggering action. Default 3 (unknown), 6 (timeout). */
   threshold?: number;
-  /** Prompt to send when context is healthy (upTokens < 80% of max). Default: watchdog.prompt ?? "continue". */
-  prompt?: string;
+  /**
+   * rate_limit two-hit confirmation window in minutes.
+   * First rate_limit records a timestamp; if a second rate_limit fires within
+   * this window, it's treated as real quota exceeded and scheduleQuotaNudge is
+   * called. Default 10.
+   */
+  rate_limit_confirm_minutes?: number;
 }
 
 /**
@@ -164,8 +176,6 @@ export interface PaneWatcherConfig {
   compact_ratio?: number;
   /** Poll interval in seconds. Default 30. */
   interval?: number;
-  /** Prompt to send after /compact. Default: watchdog.prompt ?? "continue". */
-  prompt?: string;
 }
 
 /** One agent's persisted runtime state, keyed by name in state.json. */
@@ -203,8 +213,8 @@ export interface AgentState {
   log_file_path?: string;
   /** Record of timeformat resolved from config at start (dayjs tokens). */
   timeformat?: string;
-  /** Epoch ms deadline at which max_run auto-stops the agent. */
-  max_run_deadline?: number | null;
+  /** Epoch ms deadline at which per_watch_duration auto-completes the agent. Reset on start/restart. */
+  per_watch_deadline?: number | null;
   /** Timestamps (epoch ms) of recent StopFailure events, for circuit breaking. */
   failures?: number[];
   /**
@@ -240,6 +250,12 @@ export interface AgentState {
   compact_pending_prompt?: string | null;
   /** ISO timestamp of the next scheduled quota nudge (null when no nudge scheduled). Cleared after nudge fires. */
   next_nudge_at?: string | null;
+  /**
+   * ISO timestamp of the first rate_limit trigger. Used for "two-hit confirmation":
+   * if a second rate_limit occurs within 10 minutes, treat it as real quota exceeded.
+   * Cleared on real quota confirmed / SUCCESS_RE (claude recovered).
+   */
+  rate_limit_first_at?: string | null;
   /** Runtime copy of watchdog config (for status display and watcher reads). */
   watchdog?: WatchdogConfig;
 }

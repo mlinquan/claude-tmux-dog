@@ -50,10 +50,10 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
   const existing = getAgent(cfg.name);
   if (existing && existing.claude_status === 'completed') {
     // Force-update deadline for completed agents
-    const maxRunMs = parseDuration(cfg.watchdog?.max_run);
-    const maxRunDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : null;
+    const watchMs = parseDuration(cfg.watchdog?.per_watch_duration);
+    const watchDeadline = watchMs > 0 ? Date.now() + watchMs : null;
     mutateAgent(cfg.name, (a) => {
-      a.max_run_deadline = maxRunDeadline;
+      a.per_watch_deadline = watchDeadline;
     });
   }
   if (
@@ -99,8 +99,8 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
   // tailing the log file before claude writes its first line.
   // This ensures the log watcher catches the very first API error (e.g. 429
   // quota exceeded at startup) without missing any lines.
-  const maxRunMs = parseDuration(cfg.watchdog?.max_run);
-  const maxRunDeadline = maxRunMs > 0 ? Date.now() + maxRunMs : null;
+  const watchMs = parseDuration(cfg.watchdog?.per_watch_duration);
+  const watchDeadline = watchMs > 0 ? Date.now() + watchMs : null;
 
   // Kill any leftover watcher processes from a previous run before overwriting state.
   // Must happen BEFORE upsertAgent, otherwise the old watcher_pid in state is lost
@@ -131,7 +131,7 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
     log_path: logPath,
     log_file_path: logFilePath,
     timeformat: cfg.timeformat,
-    max_run_deadline: maxRunDeadline,
+    per_watch_deadline: watchDeadline,
     failures: [],
     api_error_count: 0,
     last_recover_at: null,
@@ -173,7 +173,7 @@ export async function startCommand(configPath: string = './cdog.json'): Promise<
   if (logPath) console.log(`  ClaudeLog: ${logPath}`);
   if (logFilePath) console.log(`  CdogLog:   ${logFilePath}`);
   console.log(`  Cwd:       ${cfg.cwd}`);
-  if (maxRunDeadline) console.log(`  Max run:   ${cfg.watchdog?.max_run}`);
+  if (watchDeadline) console.log(`  Watch:     ${cfg.watchdog?.per_watch_duration}`);
 }
 
 /** `cdog start all` — restart every agent that has a config_path recorded. */

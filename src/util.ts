@@ -187,16 +187,8 @@ export function newSessionId(): string {
 }
 
 /** Current time as an ISO 8601 string with local timezone offset (e.g. +08:00). */
-export function localISO(d: Date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const off = d.getTimezoneOffset();
-  const sign = off <= 0 ? '+' : '-';
-  const abs = Math.abs(off);
-  const tz = `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
-    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${tz}`
-  );
+export function localISO(d: dayjs.Dayjs | string = dayjs()): string {
+  return dayjs(d).format();
 }
 
 /** Format a duration (ms) as "7d 0h 0m" / "2h 15m" / "12m" / "45s". */
@@ -265,14 +257,14 @@ export function formatTokenCount(n: number): string {
 
 /** Parse a local ISO string (with offset) back to epoch ms. */
 export function parseLocalISO(s: string): number {
-  return new Date(s).getTime();
+  return dayjs(s).valueOf();
 }
 
 /** Human uptime string from a started_at ISO timestamp. */
 export function uptimeFrom(startedAt: string): string {
   const started = parseLocalISO(startedAt);
   if (!Number.isFinite(started)) return '–';
-  return formatDuration(Date.now() - started);
+  return formatDuration(dayjs().valueOf() - started);
 }
 
 export function ensureCdogDir(): void {

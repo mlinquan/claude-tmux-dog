@@ -12,6 +12,7 @@ import {
   shouldIntervene,
   interveneThreshold,
   parseQuotaResetTime,
+  resolveAutoCompactConfig,
   API_ERROR_RE,
   SUCCESS_RE,
   QUOTA_RESET_RE,
@@ -79,6 +80,8 @@ describe('logwatcher.ts', () => {
         ['overloaded_error', 'overloaded_error: model is busy'],
         ['访问量过大', '该模型当前访问量过大'],
         ['稍后再试', '请稍后再试'],
+        ['Concurrent limit exceeded', '429 429 {"error":{"type":"bad_response_status_code","message":"Concurrent limit exceeded (request id: abc)"},"type":"error"}'],
+        ['new_api_error model_not_found + no channel', '503 503 {"error":{"code":"model_not_found","message":"No available channel for model deepseek-v4-flash under group glm包月 (distributor)","type":"new_api_error"}}'],
       ];
 
       cases.forEach(([name, line]) => {
@@ -90,7 +93,6 @@ describe('logwatcher.ts', () => {
 
     describe('fatal', () => {
       const cases: [string, string][] = [
-        ['model_not_found', '503 503 {"error":{"code":"model_not_found","message":"No avai'],
         ['model_not_found simple', 'model_not_found: model not available'],
         ['authentication_failed', 'authentication_failed: invalid key'],
         ['billing_error', 'billing_error: quota exceeded'],
@@ -320,6 +322,25 @@ describe('logwatcher.ts', () => {
       expect(dt!.getUTCDate()).toBe(23); // 2026-06-24 07:07:31 +0800 = 2026-06-23 23:07:31 UTC
       expect(dt!.getUTCHours()).toBe(23);
     });
+
+    it('parses Chinese reset time "将在 ... 重置"', () => {
+      const line = '500 500 {"error":{"type":"rate_limit_error","message":"[1308][已达到 5 小时的使用上限。您的限额将在 2026-06-24 17:41:17 重置。][20260624152522aa864c5d5f194501]"},"type":"error"}';
+      const dt = parseQuotaResetTime(line);
+      expect(dt).not.toBeNull();
+      expect(dt!.getFullYear()).toBe(2026);
+      expect(dt!.getMonth()).toBe(5); // June = 5
+      expect(dt!.getDate()).toBe(24);
+      expect(dt!.getHours()).toBe(17);
+      expect(dt!.getMinutes()).toBe(41);
+      expect(dt!.getSeconds()).toBe(17);
+    });
+
+    it('parses Chinese reset time without surrounding brackets', () => {
+      const dt = parseQuotaResetTime('将在 2026-06-24 17:41:17 重置');
+      expect(dt).not.toBeNull();
+      expect(dt!.getFullYear()).toBe(2026);
+      expect(dt!.getHours()).toBe(17);
+    });
   });
 
   describe('QUOTA_RESET_RE', () => {
@@ -331,8 +352,28 @@ describe('logwatcher.ts', () => {
       expect(QUOTA_RESET_RE.test('It will reset at 2026-06-24 07:07:31')).toBe(true);
     });
 
+    it('matches Chinese "将在 ... 重置"', () => {
+      expect(QUOTA_RESET_RE.test('您的限额将在 2026-06-24 17:41:17 重置')).toBe(true);
+    });
+
     it('does not match lines without reset time', () => {
       expect(QUOTA_RESET_RE.test('429 rate limit')).toBe(false);
+    });
+  });
+
+  describe('resolveAutoCompactConfig — stall defaults', () => {
+    it('defaults stall_timeout to 5min and stall_cooldown to 10min', () => {
+      const cfg = { name: 'x', cwd: '/tmp' };
+      const resolved = resolveAutoCompactConfig(cfg);
+      expect(resolved.stallTimeoutMs).toBe(5 * 60_000);
+      expect(resolved.stallCooldownMs).toBe(10 * 60_000);
+    });
+
+    it('respects custom stall_timeout / stall_cooldown', () => {
+      const cfg = { name: 'x', cwd: '/tmp', watchdog: { stall_timeout: '3m', stall_cooldown: '20m' } };
+      const resolved = resolveAutoCompactConfig(cfg);
+      expect(resolved.stallTimeoutMs).toBe(3 * 60_000);
+      expect(resolved.stallCooldownMs).toBe(20 * 60_000);
     });
   });
 });

@@ -2,16 +2,18 @@
 //
 // Ignored when detached. Determines final status:
 //   - reason "compact" / "resume" → not a real exit, ignore.
-//   - max_run deadline reached → completed (kill tmux session).
+//   - per_watch_duration deadline reached → completed (keep tmux alive, kill watchers).
 //   - reason "clear" → stopped (user manually cleared).
 //   - otherwise → failed.
 
 import type { SessionEndEvent } from '../types.js';
 import { mutateAgent } from '../state.js';
-import { tmuxHasSession, tmux, localISO } from '../util.js';
+import { tmuxHasSession, localISO } from '../util.js';
 import { logAgentEvent } from '../logger.js';
 import { notify } from '../notify.js';
 import { findBySession } from './shared.js';
+import { killLogWatcher } from '../logwatcher.js';
+import { killPaneWatcher } from '../panewatcher.js';
 
 export async function handleSessionEnd(ev: SessionEndEvent): Promise<void> {
   const reason = ev.reason ?? '';
@@ -23,12 +25,12 @@ export async function handleSessionEnd(ev: SessionEndEvent): Promise<void> {
   const now = Date.now();
   let status: 'stopped' | 'failed' | 'completed' = reason === 'clear' ? 'stopped' : 'failed';
 
-  if (agent.max_run_deadline && now >= agent.max_run_deadline) {
+  if (agent.per_watch_deadline && now >= agent.per_watch_deadline) {
     status = 'completed';
-    if (tmuxHasSession(agent.tmux_session)) {
-      tmux(['kill-session', '-t', agent.tmux_session]);
-      logAgentEvent(agent.name, 'SessionEnd: max_run reached, tmux session killed');
-    }
+    // Keep tmux alive (claude context preserved), just kill watchers
+    killLogWatcher(agent.name);
+    killPaneWatcher(agent.name);
+    logAgentEvent(agent.name, 'SessionEnd: per_watch_duration reached, watchers killed, tmux kept alive');
   }
 
   mutateAgent(agent.name, (a) => {
@@ -38,7 +40,7 @@ export async function handleSessionEnd(ev: SessionEndEvent): Promise<void> {
   });
   logAgentEvent(agent.name, `SessionEnd (${reason}) → ${status}`);
   if (status === 'completed') {
-    await notify(agent.name, 'max-run-reached', agent.name, `max_run reached → completed`);
+    await notify(agent.name, 'max-run-reached', agent.name, `per_watch_duration reached → completed`);
   } else if (reason === 'clear') {
     await notify(agent.name, 'task-completed', agent.name, `Session ended (clear) → ${status}`);
   }
