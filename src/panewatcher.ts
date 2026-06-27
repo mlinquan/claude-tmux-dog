@@ -220,52 +220,55 @@ function handleTokens(
   lastCompactAt: number,
   setLastCompactAt: (t: number) => void,
 ): void {
-  // Persist token count to state. Only advance last_up_tokens_at when the
-  // context ACTUALLY changed (delta >= 100 tokens or 1% of max), not on every
-  // TUI redraw with jitter. This keeps the timestamp a reliable "last real
-  // activity" signal for the stall watchdog's cross-check in logwatcher.ts.
-  const prevTokens = loadState()[agentName]?.last_up_tokens ?? null;
+  // Single state read — used for both the meaningful-change check and the
+  // compact decision, avoiding the previous 2 reads + 2 writes (4 lock
+  // acquisitions) per token change. Decide + apply in one mutation below.
+  const state = loadState()[agentName];
+  if (!state) return;
+
+  const prevTokens = state.last_up_tokens ?? null;
   const delta = prevTokens !== null ? Math.abs(upTokens - prevTokens) : upTokens;
   const deltaThreshold = Math.max(100, Math.round(cfg.maxTokens * 0.01));
   const meaningfulChange = prevTokens === null || delta >= deltaThreshold;
+
+  // Decide whether to trigger a compact, from the same snapshot we persist.
+  const overThreshold = upTokens >= cfg.compactThreshold;
+  const now = Date.now();
+  const inCooldown = overThreshold && now - lastCompactAt < RECOVER_COOLDOWN_MS;
+  const shouldCompact =
+    overThreshold && !state.compact_in_progress && !inCooldown && state.cdog_status !== 'detached';
+
+  // One write: persist token count (always) + compact flags (when triggering).
   mutateAgent(agentName, (a) => {
     a.last_up_tokens = upTokens;
     if (meaningfulChange) {
       a.last_up_tokens_at = new Date().toISOString();
     }
-  });
-
-  // Skip if a compact is already in progress (waiting for PostCompact hook)
-  const state = loadState()[agentName];
-  if (!state) return;
-  if (state.compact_in_progress) return;
-
-  if (upTokens >= cfg.compactThreshold) {
-    const now = Date.now();
-    if (now - lastCompactAt < RECOVER_COOLDOWN_MS) return;
-
-    if (state.cdog_status === 'detached') return;
-
-    setLastCompactAt(now);
-    logAgentEvent(agentName, `pane-watcher: ↑ ${upTokens} tokens >= ${cfg.compactThreshold} (${Math.round(cfg.compactRatio * 100)}%), triggering compact`);
-
-    // Set compact_in_progress flag — PostCompact hook will send the nudge.
-    mutateAgent(agentName, (a) => {
+    if (shouldCompact) {
       a.compact_in_progress = true;
       a.compact_sent_at = new Date().toISOString();
       a.compact_pending_prompt = cfg.prompt;
       a.last_recover_at = new Date().toISOString();
-    });
+    }
+  });
 
-    // Send /compact. PostCompact hook will fire when it's done → sends nudge.
-    tmux(['send-keys', '-t', session, '/compact', 'C-m']);
-    logAgentEvent(agentName, `pane-watcher: /compact sent (waiting for PostCompact hook to nudge)`);
-
-    notify(agentName, 'circuit-breaker', agentName,
-      `Proactive compact: ↑ ${upTokens} tokens (${Math.round(upTokens / cfg.maxTokens * 100)}% of ${cfg.maxTokens})`);
-  } else {
+  if (!overThreshold) {
     logAgentEvent(agentName, `pane-watcher: ↑ ${upTokens} tokens (${Math.round(upTokens / cfg.maxTokens * 100)}%)`);
+    return;
   }
+  if (state.compact_in_progress) return; // already compacting
+  if (!shouldCompact) return; // cooldown, or detached
+
+  setLastCompactAt(now);
+  logAgentEvent(agentName, `pane-watcher: ↑ ${upTokens} tokens >= ${cfg.compactThreshold} (${Math.round(cfg.compactRatio * 100)}%), triggering compact`);
+
+  // /compact already armed above (compact_in_progress=true). PostCompact hook
+  // will fire when it's done → sends nudge. tmux send-keys here initiates it.
+  tmux(['send-keys', '-t', session, '/compact', 'C-m']);
+  logAgentEvent(agentName, `pane-watcher: /compact sent (waiting for PostCompact hook to nudge)`);
+
+  notify(agentName, 'circuit-breaker', agentName,
+    `Proactive compact: ↑ ${upTokens} tokens (${Math.round(upTokens / cfg.maxTokens * 100)}% of ${cfg.maxTokens})`);
 }
 
 function cleanupPipe(agentName: string, session: string, pipeFile: string): void {

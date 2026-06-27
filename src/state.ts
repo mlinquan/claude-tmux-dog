@@ -28,8 +28,20 @@ const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_POLL_MS = 50;
 
 /**
+ * Synchronous sleep that does NOT burn CPU. Atomics.wait blocks the thread
+ * (releasing the core) until the timeout elapses — unlike a busy-wait loop.
+ * Node.js enables SharedArrayBuffer + Atomics.wait on the main thread by
+ * default (unlike browsers). One shared buffer reused across calls.
+ */
+const SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+function syncSleepMs(ms: number): void {
+  Atomics.wait(SLEEP_BUF, 0, 0, ms);
+}
+
+/**
  * Acquire an exclusive lock on state.json via O_EXCL on a .lock file.
- * Spin-waits up to LOCK_TIMEOUT_MS. Throws on timeout.
+ * Polls every LOCK_POLL_MS (sleeping, not spinning) up to LOCK_TIMEOUT_MS.
+ * Throws on timeout.
  *
  * Returns a release function that MUST be called in a finally block.
  */
@@ -60,11 +72,8 @@ function acquireLock(): () => void {
         }
         throw new Error(`state.json lock timeout after ${LOCK_TIMEOUT_MS}ms`);
       }
-      // Spin-wait.
-      const start = Date.now();
-      while (Date.now() - start < LOCK_POLL_MS) {
-        // Busy-wait is fine for 50ms intervals.
-      }
+      // Wait without burning a CPU core (Atomics.wait blocks; no spin).
+      syncSleepMs(LOCK_POLL_MS);
     }
   }
 
