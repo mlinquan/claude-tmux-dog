@@ -43,6 +43,24 @@ export interface CdogConfig {
   watchdog?: WatchdogConfig;
   /** Optional desktop notification settings. */
   notify?: NotifyConfig;
+  /** Optional `cdog stop` behavior. */
+  stop?: StopConfig;
+}
+
+/** Configuration for the `cdog stop` command. */
+export interface StopConfig {
+  /**
+   * On `cdog stop`, abort claude's in-progress turn by sending a single Esc,
+   * but keep the claude process alive (claude_status → 'waiting', not exited).
+   * Only fires when claude is actively working (claude_status running/pending);
+   * otherwise stop detaches as usual without sending any key.
+   *
+   * Why Esc (not C-c): Esc interrupts the current turn and returns claude to
+   * its input prompt with the process still alive — exactly "suspend, don't
+   * exit". C-c risks exiting the process on a second press and is reserved for
+   * the recovery flow (breakToShell). Default false (opt-in).
+   */
+  abort_work?: boolean;
 }
 
 /** Event types that can trigger a desktop notification + sound. */
