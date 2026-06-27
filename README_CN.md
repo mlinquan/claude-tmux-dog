@@ -201,6 +201,21 @@ cdog log
 | `log_file` | | cdog 操作日志路径 |
 | `watchdog` | | 自动管理策略 |
 | `notify` | | 桌面通知设置 |
+| `stop` | | `cdog stop` 行为 |
+
+### 停止配置
+
+| 字段 | 默认值 | 说明 |
+|-------|---------|-------------|
+| `abort_work` | `false` | `cdog stop` 时,若 claude 正在干活(running/pending),发送一次 **Esc** 中断当前那轮工作并把状态置为 `waiting`——claude **进程保持存活**(挂起,不退出)。用 Esc 而非 `Ctrl+C`,避免误退出进程;`Ctrl+C` 留给恢复流程。claude 空闲或 tmux 会话已消失时不做任何事。 |
+
+```json
+{
+  "name": "my-agent",
+  "cwd": ".",
+  "stop": { "abort_work": true }
+}
+```
 
 ### 看门狗配置
 

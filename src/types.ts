@@ -25,7 +25,7 @@ export interface CdogConfig {
   md?: string | string[];
   /** Extra CLI args appended to the claude command, each as a separate token. */
   args?: string[];
-  /** Claude debug log path, relative to cwd. If set, appends `--debug-file <path>`. If unset, claude writes no debug log. */
+  /** Claude debug log path, relative to cwd. cdog always passes `--debug-file <path>` to claude (the log watcher needs a file to tail); defaults to `<cwd>/logs/claude-debug.log` when unset. */
   log?: string;
   /** cdog's OWN operation log path (the `[name] | ...` lines). If unset, cdog writes no operation log. */
   log_file?: string;

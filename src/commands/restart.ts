@@ -60,11 +60,21 @@ export async function restartCommand(name: string): Promise<void> {
   // If it died (e.g. user C-c'd it, pane is now a shell), restart it via --resume.
   // Track whether we relaunched so we know NOT to kick (relaunch re-inits via md).
   const liveness = detectLiveness(session);
+
+  // Load config ONCE (best-effort) — reused for the recover command, the watch
+  // deadline, and the kick prompt. Previously this read the cdog.json from disk
+  // up to three times per restart.
+  const cfg =
+    agent.config_path && existsSync(agent.config_path)
+      ? (() => {
+          try { return loadConfig(agent.config_path); } catch { return null; }
+        })()
+      : null;
+
   let resumed = false;
   if (liveness !== 'claude') {
-    if (agent.config_path && existsSync(agent.config_path) && agent.session_id) {
+    if (cfg && agent.session_id) {
       try {
-        const cfg = loadConfig(agent.config_path);
         const recoverCmd = buildRecoverCommand(cfg, agent.session_id);
         // Launch claude inside the existing pane (session is alive, just a shell)
         tmux(['send-keys', '-t', session, recoverCmd, 'Enter']);
@@ -90,13 +100,10 @@ export async function restartCommand(name: string): Promise<void> {
   // Each restart starts a fresh watch window.
   let watchDeadline: number | null = null;
   let watchDur: string | undefined;
-  if (agent.config_path && existsSync(agent.config_path)) {
-    try {
-      const cfg = loadConfig(agent.config_path);
-      watchDur = cfg.watchdog?.per_watch_duration;
-      const watchMs = parseDuration(watchDur);
-      watchDeadline = watchMs > 0 ? Date.now() + watchMs : null;
-    } catch { /* best effort */ }
+  if (cfg) {
+    watchDur = cfg.watchdog?.per_watch_duration;
+    const watchMs = parseDuration(watchDur);
+    watchDeadline = watchMs > 0 ? Date.now() + watchMs : null;
   }
 
   // Re-attach cdog monitoring + reset watch window
@@ -127,9 +134,6 @@ export async function restartCommand(name: string): Promise<void> {
   let kicked = false;
   if (!resumed && liveness === 'claude' && !wasWorking) {
     try {
-      const cfg = freshAgent.config_path && existsSync(freshAgent.config_path)
-        ? loadConfig(freshAgent.config_path)
-        : null;
       const prompt = resolvePrompt(cfg);
       tmuxSendText(session, prompt, true);
       kicked = true;

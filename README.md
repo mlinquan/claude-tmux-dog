@@ -202,6 +202,21 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 | `log_file` | | cdog operation log path |
 | `watchdog` | | Auto-management policy |
 | `notify` | | Desktop notification settings |
+| `stop` | | `cdog stop` behavior |
+
+### Stop Configuration
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `abort_work` | `false` | On `cdog stop`, when claude is actively working (running/pending), send a single **Esc** to abort the in-progress turn and set status to `waiting` — the claude **process stays alive** (suspend, don't exit). Esc is used instead of `Ctrl+C` so the process can't be accidentally exited; `Ctrl+C` stays reserved for the recovery flow. No-op when claude is idle or the tmux session is gone. |
+
+```json
+{
+  "name": "my-agent",
+  "cwd": ".",
+  "stop": { "abort_work": true }
+}
+```
 
 ### Watchdog Configuration
 
