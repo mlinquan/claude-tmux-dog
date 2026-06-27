@@ -25,6 +25,14 @@ export interface CdogConfig {
   md?: string | string[];
   /** Extra CLI args appended to the claude command, each as a separate token. */
   args?: string[];
+  /**
+   * Environment variables injected into the launched claude process, as KEY=value
+   * assignments prefixed to the claude command (e.g. `DISABLE_TELEMETRY=1
+   * CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1 claude ...`). Useful for claude's
+   * env-tunable behavior without touching ~/.zshrc or ~/.claude/settings.json.
+   * Applied to claude only (after any `cat md |` pipe).
+   */
+  env?: Record<string, string>;
   /** Claude debug log path, relative to cwd. cdog always passes `--debug-file <path>` to claude (the log watcher needs a file to tail); defaults to `<cwd>/logs/claude-debug.log` when unset. */
   log?: string;
   /** cdog's OWN operation log path (the `[name] | ...` lines). If unset, cdog writes no operation log. */

@@ -56,10 +56,33 @@ export interface BuiltCommand {
 /**
  * Assemble the claude command for `start`.
  *
- *   [cat <md1> <md2> ... | ] claude --session-id <sid> --name <name> [args...] [--debug-file <log>]
+ *   [cat <md1> <md2> ... | ] [K=V ...] claude --session-id <sid> --name <name> [args...] [--debug-file <log>]
  *
- * Environment variables are NOT injected by cdog — set them in ~/.claude/settings.json or ~/.zshrc.
+ * cfg.env vars (if any) prefix `claude` as K=V assignments so the launched
+ * process inherits them (applied after the pipe → claude only).
  */
+/**
+ * Render cfg.env as a list of `KEY=value` shell words (values shell-quoted),
+ * to prefix the claude command so the launched process inherits them.
+ *
+ *   { "DISABLE_TELEMETRY": "1", "FOO": "bar baz" }
+ *   → ["DISABLE_TELEMETRY=1", "FOO='bar baz'"]
+ *
+ * Keys must be valid env-var names (validated); empty when env unset/empty.
+ * These apply only to claude — placed AFTER any `cat md |` pipe.
+ */
+function renderEnvWords(cfg: CdogConfig): string[] {
+  const env = cfg.env;
+  if (!env || typeof env !== 'object') return [];
+  const words: string[] = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (k && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+      words.push(`${k}=${shellQuote(String(v ?? ''))}`);
+    }
+  }
+  return words;
+}
+
 export function buildStartCommand(cfg: CdogConfig, sessionId: string): BuiltCommand {
   const parts: string[] = [];
   const mdPaths = resolveMdPaths(cfg);
@@ -67,6 +90,9 @@ export function buildStartCommand(cfg: CdogConfig, sessionId: string): BuiltComm
     parts.push('cat', ...mdPaths.map(shellQuote), '|');
   }
 
+  // Env vars prefix claude only (after the pipe) — applied to the launched
+  // process, not to `cat`.
+  parts.push(...renderEnvWords(cfg));
   parts.push('claude', '--session-id', shellQuote(sessionId), '--name', shellQuote(cfg.name));
 
   if (cfg.args && cfg.args.length > 0) {
@@ -90,7 +116,7 @@ export function buildStartCommand(cfg: CdogConfig, sessionId: string): BuiltComm
  * Includes `cat <md...> |` when md task files are configured, so a fresh
  * `/new` session picks the task back up on resume.
  *
- * Environment variables are NOT injected by cdog — set them in ~/.claude/settings.json or ~/.zshrc.
+ * cfg.env vars are prefixed the same way as buildStartCommand.
  */
 export function buildRecoverCommand(cfg: CdogConfig, sessionId: string): string {
   const parts: string[] = [];
@@ -99,6 +125,7 @@ export function buildRecoverCommand(cfg: CdogConfig, sessionId: string): string 
     parts.push('cat', ...mdPaths.map(shellQuote), '|');
   }
 
+  parts.push(...renderEnvWords(cfg));
   parts.push('claude', '--resume', shellQuote(sessionId));
   if (cfg.args && cfg.args.length > 0) {
     for (const a of cfg.args) parts.push(shellQuote(a));

@@ -197,6 +197,7 @@ cdog log
 | `cwd` | ✓ | 工作目录(tmux 会话在此创建) |
 | `md` | | 启动时传给 claude 的任务 markdown |
 | `args` | | claude 的附加 CLI 参数 |
+| `env` | | 注入到启动的 claude 进程的环境变量,如 `{"DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"}`。以 `K=V` 前缀加在 `claude` 前(只对 claude 生效)。 |
 | `log` | | claude 调试日志路径(默认:`<cwd>/logs/claude-debug.log`) |
 | `log_file` | | cdog 操作日志路径 |
 | `watchdog` | | 自动管理策略 |

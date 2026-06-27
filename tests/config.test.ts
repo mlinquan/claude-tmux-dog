@@ -107,6 +107,26 @@ describe('config.ts', () => {
       expect(cmd.cmd).toContain('--debug-file');
     });
 
+    it('prefixes env vars before claude', () => {
+      const cfg = makeConfig({ env: { DISABLE_TELEMETRY: '1', CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: '1' } });
+      const cmd = buildStartCommand(cfg, 'sid-123');
+      expect(cmd.cmd).toContain('DISABLE_TELEMETRY=1');
+      expect(cmd.cmd).toContain('CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1');
+      // env comes before claude, after a cat pipe (applies to claude only)
+      expect(cmd.cmd.indexOf('DISABLE_TELEMETRY=1')).toBeLessThan(cmd.cmd.indexOf('claude'));
+    });
+
+    it('shell-quotes env values with spaces', () => {
+      const cfg = makeConfig({ env: { FOO: 'bar baz' } });
+      const cmd = buildStartCommand(cfg, 'sid-123');
+      expect(cmd.cmd).toContain("FOO='bar baz'");
+    });
+
+    it('omits env prefix when not set', () => {
+      const cmd = buildStartCommand(makeConfig(), 'sid-123');
+      expect(cmd.cmd).toMatch(/^claude /);
+    });
+
     it('uses configured log path when set', () => {
       const cfg = makeConfig({ log: 'logs/debug.log' });
       const cmd = buildStartCommand(cfg, 'sid-123');

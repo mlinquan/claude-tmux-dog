@@ -198,6 +198,7 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 | `cwd` | ✓ | Working directory (tmux session created here) |
 | `md` | | Task markdown file(s) piped to claude on start |
 | `args` | | Extra CLI flags for claude |
+| `env` | | Env vars injected into the launched claude process, e.g. `{"DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"}`. Prefixed as `K=V` before `claude` (applies to claude only). |
 | `log` | | Claude debug log path (default: `<cwd>/logs/claude-debug.log`) |
 | `log_file` | | cdog operation log path |
 | `watchdog` | | Auto-management policy |
