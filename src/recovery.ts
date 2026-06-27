@@ -33,19 +33,45 @@ export type Liveness = 'claude' | 'shell' | 'dead';
  * Check if a process (by PID) has a descendant named 'claude' or 'node'.
  * Used when the pane's top-level process is a shell — we need to look into
  * the shell's children to see if claude is running inside it.
+ *
+ * Performance: one `ps -A` call fetches the whole process table; the tree is
+ * walked in JS. The previous implementation forked `pgrep` + `ps` once per
+ * process-tree node (recursively), costing ~180ms per detectLiveness call on a
+ * real session. This version is one subprocess (~10ms).
  */
-function hasClaudeDescendant(pid: number): boolean {
+function hasClaudeDescendant(rootPid: number): boolean {
   try {
-    // pgrep -P <pid> lists direct children. Recursively walk one level deep.
-    const out = execFileSync('pgrep', ['-P', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (!out) return false;
-    const childPids = out.split('\n').filter(Boolean);
-    for (const cp of childPids) {
-      // ps -o comm= -p <pid> gives the command name (without args).
-      const comm = execFileSync('ps', ['-o', 'comm=', '-p', cp], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().toLowerCase();
+    // One call: ppid, pid, comm for every process.
+    const out = execFileSync('ps', ['-A', '-o', 'ppid=', '-o', 'pid=', '-o', 'comm='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    // Build pid -> {ppid, comm} and a ppid -> [child pids] index in one pass.
+    const commOf = new Map<number, string>();
+    const childrenOf = new Map<number, number[]>();
+    for (const line of out.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const ppid = parseInt(parts[0], 10);
+      const pid = parseInt(parts[1], 10);
+      if (!Number.isFinite(pid)) continue;
+      const comm = parts.slice(2).join(' ').toLowerCase();
+      commOf.set(pid, comm);
+      const arr = childrenOf.get(ppid);
+      if (arr) arr.push(pid);
+      else childrenOf.set(ppid, [pid]);
+    }
+    // BFS from rootPid's subtree (excluding root itself, which is the shell).
+    const queue = childrenOf.get(rootPid) ?? [];
+    const seen = new Set<number>();
+    while (queue.length) {
+      const pid = queue.shift()!;
+      if (seen.has(pid)) continue;
+      seen.add(pid);
+      const comm = commOf.get(pid);
       if (comm === 'claude' || comm === 'node') return true;
-      // Recursively check grandchildren (one level is usually enough, but be thorough).
-      if (hasClaudeDescendant(parseInt(cp, 10))) return true;
+      const kids = childrenOf.get(pid);
+      if (kids) for (const k of kids) queue.push(k);
     }
     return false;
   } catch {
