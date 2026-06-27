@@ -12,11 +12,23 @@ import { join } from 'node:path';
 const tmpDir = mkdtempSync(join(tmpdir(), 'cdog-stop-'));
 process.env.CDOG_DIR = tmpDir;
 
-const { decideAbort, isWorking } = await import('../src/commands/stop.js');
+const { decideAbort, isWorking, resolveAbortWork } = await import('../src/commands/stop.js');
 const { loadConfig } = await import('../src/config.js');
 import type { ClaudeStatus } from '../src/types.js';
 
 describe('cdog stop abort (WS-C)', () => {
+  describe('resolveAbortWork (default true)', () => {
+    it('defaults to true when the field is absent (undefined)', () => {
+      expect(resolveAbortWork(undefined)).toBe(true);
+    });
+    it('is true when explicitly true', () => {
+      expect(resolveAbortWork(true)).toBe(true);
+    });
+    it('is false only when explicitly false (opt-out)', () => {
+      expect(resolveAbortWork(false)).toBe(false);
+    });
+  });
+
   describe('isWorking', () => {
     it('true only for running/pending', () => {
       const yes: ClaudeStatus[] = ['running', 'pending'];
@@ -40,7 +52,7 @@ describe('cdog stop abort (WS-C)', () => {
       }
     });
 
-    it('does NOT abort when abort_work is disabled (default)', () => {
+    it('does NOT abort when abort_work is explicitly false', () => {
       expect(decideAbort({ abortWork: false, sessionAlive: true, status: 'running' })).toBe(false);
     });
 
@@ -54,16 +66,18 @@ describe('cdog stop abort (WS-C)', () => {
       try { rmSync(join(tmpDir, 'cfg.json'), { force: true }); } catch { /* ignore */ }
     });
 
-    it('stop.abort_work defaults to undefined (falsy) when absent', () => {
+    it('stop.abort_work is undefined when absent (default-true resolution happens in resolveAbortWork)', () => {
       const cfgPath = join(tmpDir, 'cfg.json');
       writeFileSync(cfgPath, JSON.stringify({ name: 'x', cwd: tmpDir }), 'utf8');
       expect(loadConfig(cfgPath).stop?.abort_work).toBeUndefined();
+      expect(resolveAbortWork(loadConfig(cfgPath).stop?.abort_work)).toBe(true);
     });
 
-    it('stop.abort_work parses when set', () => {
+    it('stop.abort_work=false parses and resolves to false (opt-out)', () => {
       const cfgPath = join(tmpDir, 'cfg.json');
-      writeFileSync(cfgPath, JSON.stringify({ name: 'x', cwd: tmpDir, stop: { abort_work: true } }), 'utf8');
-      expect(loadConfig(cfgPath).stop?.abort_work).toBe(true);
+      writeFileSync(cfgPath, JSON.stringify({ name: 'x', cwd: tmpDir, stop: { abort_work: false } }), 'utf8');
+      expect(loadConfig(cfgPath).stop?.abort_work).toBe(false);
+      expect(resolveAbortWork(loadConfig(cfgPath).stop?.abort_work)).toBe(false);
     });
   });
 

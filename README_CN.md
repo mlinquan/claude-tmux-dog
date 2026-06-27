@@ -207,7 +207,7 @@ cdog log
 
 | 字段 | 默认值 | 说明 |
 |-------|---------|-------------|
-| `abort_work` | `false` | `cdog stop` 时,若 claude 正在干活(running/pending),发送一次 **Esc** 中断当前那轮工作并把状态置为 `waiting`——claude **进程保持存活**(挂起,不退出)。用 Esc 而非 `Ctrl+C`,避免误退出进程;`Ctrl+C` 留给恢复流程。claude 空闲或 tmux 会话已消失时不做任何事。 |
+| `abort_work` | `true` | `cdog stop` 时,若 claude 正在干活(running/pending),发送一次 **Esc** 中断当前那轮工作并把状态置为 `waiting`——claude **进程保持存活**(挂起,不退出)。用 Esc 而非 `Ctrl+C`,避免误退出进程;`Ctrl+C` 留给恢复流程。claude 空闲或 tmux 会话已消失时不做任何事。默认 `true`(`stop` 即停下);设为 `false` 则只脱管、不打断当前那轮。 |
 
 ```json
 {

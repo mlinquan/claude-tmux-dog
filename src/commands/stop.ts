@@ -17,14 +17,27 @@ import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 import type { AgentState, ClaudeStatus } from '../types.js';
 
-/** Read stop.abort_work from the agent's cdog.json (best-effort, default false). */
+/**
+ * Resolve the raw `stop.abort_work` config value to its effective boolean.
+ * DEFAULT TRUE: `cdog stop` aborts the in-progress turn unless explicitly
+ * disabled with `stop.abort_work: false`. Only an explicit false opts out;
+ * undefined (field absent / no config) and true both mean "abort".
+ */
+export function resolveAbortWork(raw: boolean | undefined): boolean {
+  return raw !== false;
+}
+
+/** Read stop.abort_work from the agent's cdog.json, defaulting to true. */
 function shouldAbortWork(agent: AgentState): boolean {
-  if (!agent.config_path || !existsSync(agent.config_path)) return false;
-  try {
-    return loadConfig(agent.config_path).stop?.abort_work === true;
-  } catch {
-    return false;
+  let raw: boolean | undefined;
+  if (agent.config_path && existsSync(agent.config_path)) {
+    try {
+      raw = loadConfig(agent.config_path).stop?.abort_work;
+    } catch {
+      /* fall through to default */
+    }
   }
+  return resolveAbortWork(raw);
 }
 
 /** claude is mid-turn (worth interrupting)? */

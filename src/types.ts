@@ -58,7 +58,9 @@ export interface StopConfig {
    * Why Esc (not C-c): Esc interrupts the current turn and returns claude to
    * its input prompt with the process still alive — exactly "suspend, don't
    * exit". C-c risks exiting the process on a second press and is reserved for
-   * the recovery flow (breakToShell). Default false (opt-in).
+   * the recovery flow (breakToShell). DEFAULT TRUE — `stop` semantically means
+   * halt; set `false` explicitly to opt out (detach without interrupting the
+   * current turn, e.g. for maintenance).
    */
   abort_work?: boolean;
 }
