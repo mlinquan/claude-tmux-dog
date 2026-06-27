@@ -10,9 +10,10 @@
 
 import { existsSync } from 'node:fs';
 import { loadState, mutateAgent } from '../state.js';
-import { tmuxHasSession, tmuxChecked, sleep } from '../util.js';
+import { tmuxHasSession, tmuxChecked, tmuxCapturePane, sleep } from '../util.js';
 import { loadConfig } from '../config.js';
 import { logAgentEvent, logSwallow } from '../logger.js';
+import { isClaudeWorking } from '../recovery.js';
 import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 import type { AgentState, ClaudeStatus } from '../types.js';
@@ -108,19 +109,27 @@ export async function stopCommand(name: string): Promise<void> {
     } catch (e) {
       logSwallow(name, 'stop abort (Esc)', e);
     }
-    // VERIFY via the hook (the trusted source): the Esc-interrupted turn ends
-    // → Stop hook → detached observe sets claude_status='waiting'. Poll for it.
-    // If it doesn't flip, Esc didn't take — tell the user, don't lie.
-    confirmed = await waitForClaudeStatus(name, 'waiting', 4000);
+    // VERIFY via the pane — NOT a hook. Per the Claude Code hooks reference,
+    // the Stop hook "Does not run if the stoppage occurred due to a user
+    // interrupt", and Esc is a user interrupt. So no hook will flip the status;
+    // cdog must confirm claude actually went idle by inspecting the pane, then
+    // set 'waiting' itself (the one principled manual write — verified, not
+    // guessed). If it never goes idle, Esc didn't take — warn, leave running.
+    confirmed = await waitForIdle(session, 4000);
+    if (confirmed) {
+      mutateAgent(name, (a) => {
+        a.claude_status = 'waiting';
+      });
+    }
   }
 
   const alive = tmuxHasSession(session);
   if (wantAbort && confirmed) {
-    logAgentEvent(name, 'detached + aborted in-progress turn (Esc×2); claude confirmed idle (waiting via Stop hook)');
+    logAgentEvent(name, 'detached + aborted in-progress turn (Esc×2); claude confirmed idle via pane (waiting)');
     console.log(`✓ ${name} detached — in-progress turn aborted, claude suspended (waiting)${alive ? ` in ${session}` : ''}`);
   } else if (wantAbort && !confirmed) {
-    logAgentEvent(name, 'detached; Esc×2 sent but could NOT confirm claude stopped (no Stop hook / still working) — status left as-is, retryable');
-    console.log(`⚠ ${name} detached — Esc sent but could NOT confirm claude stopped within 4s; it may still be working. Re-run \`cdog stop ${name}\` to retry.`);
+    logAgentEvent(name, 'detached; Esc×2 sent but claude still working after 4s — could not confirm stop; status left running (retryable)');
+    console.log(`⚠ ${name} detached — Esc sent but claude still working after 4s; it did NOT stop. Re-run \`cdog stop ${name}\` to retry.`);
   } else {
     logAgentEvent(name, 'detached (cdog stopped watching, claude left as-is)');
     console.log(`✓ ${name} detached — cdog no longer watching${alive ? ` (claude still running in ${session})` : ''}`);
@@ -128,14 +137,16 @@ export async function stopCommand(name: string): Promise<void> {
 }
 
 /**
- * Poll state.json until claude_status === target, or timeout. Used by stop to
- * confirm (via the Stop hook) that claude actually went idle after Esc.
+ * Poll the pane until claude's working spinner disappears (idle), or timeout.
+ * Used by stop to confirm — via the pane, the ground truth — that Esc actually
+ * interrupted claude. (The Stop hook does NOT fire on user interrupt, so we
+ * cannot rely on a hook here.)
  */
-async function waitForClaudeStatus(name: string, target: ClaudeStatus, timeoutMs: number): Promise<boolean> {
+async function waitForIdle(session: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (loadState()[name]?.claude_status === target) return true;
-    await sleep(250);
+    if (!isClaudeWorking(tmuxCapturePane(session, 30))) return true;
+    await sleep(300);
   }
   return false;
 }

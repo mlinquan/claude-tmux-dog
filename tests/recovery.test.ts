@@ -12,7 +12,7 @@ import { join } from 'node:path';
 const tmpDir = mkdtempSync(join(tmpdir(), 'cdog-test-'));
 process.env.CDOG_DIR = tmpDir;
 
-const { parsePaneTokens, COMPACT_TOKEN_RATIO } = await import('../src/recovery.js');
+const { parsePaneTokens, COMPACT_TOKEN_RATIO, isClaudeWorking } = await import('../src/recovery.js');
 
 describe('recovery.ts', () => {
   describe('parsePaneTokens', () => {
@@ -74,6 +74,18 @@ describe('recovery.ts', () => {
   describe('COMPACT_TOKEN_RATIO', () => {
     it('is 0.8', () => {
       expect(COMPACT_TOKEN_RATIO).toBe(0.8);
+    });
+  });
+
+  describe('isClaudeWorking', () => {
+    it('true while working (live spinner + ellipsis + timer)', () => {
+      expect(isClaudeWorking('✻ Incubating… (1m 47s · ↓ 2.0k tokens)')).toBe(true);
+      expect(isClaudeWorking('✻ Jitterbugging… (32m 26s · ↑ 24.6k tokens)')).toBe(true);
+    });
+    it('false when idle (past-tense, no ellipsis)', () => {
+      expect(isClaudeWorking('✻ Cogitated for 1m 54s')).toBe(false);
+      expect(isClaudeWorking('❯')).toBe(false);
+      expect(isClaudeWorking('')).toBe(false);
     });
   });
 });

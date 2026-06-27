@@ -145,6 +145,30 @@ export function parsePaneTokens(paneContent: string): { upTokens: number | null 
 }
 
 /**
+ * Is claude actively working right now, inferred from the pane?
+ *
+ * Claude's TUI shows a live spinner line while working:
+ *   ✻ Incubating… (1m 47s · ↓ 2.0k tokens)   ← verb + ellipsis + (timer) = WORKING
+ *   ✻ Cogitated for 1m 54s                    ← past-tense "for" = IDLE
+ *
+ * We can't rely on hooks here: per the Claude Code hooks reference, the Stop
+ * hook "Does not run if the stoppage occurred due to a user interrupt." So an
+ * Esc/C-c interrupt fires NO status hook — cdog must inspect the pane to tell
+ * working from idle when verifying its own interrupt (cdog stop).
+ *
+ * Working = a ✻ spinner line containing an ellipsis (…) — the in-progress form.
+ */
+const WORKING_SPINNER_RE = /✻[^\n]*…/;
+export function isClaudeWorking(paneContent: string): boolean {
+  return WORKING_SPINNER_RE.test(paneContent);
+}
+
+/** Capture the pane and return whether claude is currently working. */
+export function claudeIsWorking(tmuxSession: string): boolean {
+  return isClaudeWorking(tmuxCapturePane(tmuxSession, 30));
+}
+
+/**
  * Capture the tmux pane and extract the current ↑ token count.
  * Returns null if claude is idle (no status line) or tokens can't be parsed.
  */
