@@ -4,7 +4,7 @@
 // ~/.cdog/state.json is never touched.
 
 import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -67,6 +67,44 @@ describe('state.ts', () => {
       saveState({ alpha: agent });
       const loaded = loadState();
       expect(loaded.alpha).toEqual(agent);
+    });
+  });
+
+  describe('durability (WS-A)', () => {
+    it('backs up a corrupt state file instead of silently wiping it', () => {
+      const corrupt = 'not json{';
+      writeFileSync(join(tmpDir, 'state.json'), corrupt, 'utf8');
+      const state = loadState();
+      // Contract preserved: still returns {} for corrupt input.
+      expect(state).toEqual({});
+      // A backup of the original corrupt contents now exists on disk.
+      const backups = readdirSync(tmpDir).filter((f) => /^state\.json\.corrupt\./.test(f));
+      expect(backups.length).toBeGreaterThanOrEqual(1);
+      expect(readFileSync(join(tmpDir, backups[backups.length - 1]!), 'utf8')).toBe(corrupt);
+    });
+
+    it('leaves state.json intact and cleans the temp file when a save cannot start', () => {
+      // Seed a valid, complete state.
+      saveState({ keep: makeAgent('keep') });
+      const before = readFileSync(join(tmpDir, 'state.json'), 'utf8');
+
+      // Pre-create the temp file so saveStateRaw's openSync(tmp, 'wx') throws
+      // EEXIST — a deterministic way to trigger the failure path without mocking fs.
+      const tmp = join(tmpDir, `state.json.tmp.${process.pid}`);
+      writeFileSync(tmp, 'partial junk that must never become state.json', 'utf8');
+
+      expect(() => saveState({ other: makeAgent('other') })).toThrow();
+
+      // Atomicity: only the temp was ever written; state.json is untouched.
+      expect(readFileSync(join(tmpDir, 'state.json'), 'utf8')).toBe(before);
+      // The failure path cleaned up its temp file.
+      expect(existsSync(tmp)).toBe(false);
+    });
+
+    it('does not leave a temp file behind after a successful save', () => {
+      saveState({ ok: makeAgent('ok') });
+      const leftovers = readdirSync(tmpDir).filter((f) => /^state\.json\.tmp\./.test(f));
+      expect(leftovers).toEqual([]);
     });
   });
 

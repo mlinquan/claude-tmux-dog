@@ -5,12 +5,25 @@
 // timeout. This prevents lost updates when multiple cdog processes (e.g.
 // `cdog notify` triggered by concurrent hooks) write state simultaneously.
 
-import { readFileSync, writeFileSync, existsSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  openSync,
+  closeSync,
+  unlinkSync,
+  renameSync,
+  writeSync,
+  fsyncSync,
+  appendFileSync,
+} from 'node:fs';
 import type { AgentState, StateMap } from './types.js';
 import { STATE_PATH, ensureCdogDir, CDOG_DIR } from './util.js';
 import { join } from 'node:path';
 
 const LOCK_PATH = join(CDOG_DIR, 'state.json.lock');
+/** Append-only log for state-corruption events (self-contained, no logger import → no cycle). */
+const CORRUPT_LOG_PATH = join(CDOG_DIR, 'state-corrupt.log');
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_POLL_MS = 50;
 
@@ -85,19 +98,79 @@ function withStateLock<T>(fn: (state: StateMap) => T): T {
 /** Load the full state map (empty if missing/corrupt). No locking. */
 function loadStateRaw(): StateMap {
   if (!existsSync(STATE_PATH)) return {};
+  let raw: string;
   try {
-    const raw = readFileSync(STATE_PATH, 'utf8');
+    raw = readFileSync(STATE_PATH, 'utf8');
+  } catch {
+    return {};
+  }
+  try {
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? (parsed as StateMap) : {};
   } catch {
+    // Corrupt JSON. Back up the bad file BEFORE returning fresh, so the next
+    // save doesn't silently destroy potentially-recoverable data. Preserve the
+    // public contract (return {}) — callers depend on a StateMap.
+    backupCorruptState(raw);
     return {};
   }
 }
 
-/** Persist the full state map atomically (write to temp + rename). No locking. */
+/**
+ * Back up a corrupt state.json so its contents survive the fresh-start save,
+ * and surface the event loudly (stderr + append-only log). Self-contained: no
+ * logger import (logger.ts depends on state.ts → would be a cycle).
+ */
+function backupCorruptState(raw: string): void {
+  const ts = Date.now();
+  const base = `${STATE_PATH}.corrupt.${ts}`;
+  // Avoid clobbering an existing backup that shares the same ms timestamp.
+  let backup = base;
+  let i = 1;
+  while (existsSync(backup)) {
+    backup = `${base}.${i++}`;
+  }
+  try {
+    writeFileSync(backup, raw, 'utf8');
+  } catch {
+    /* can't back up — nothing more we can do; still return fresh below */
+  }
+  const msg = `[${new Date().toISOString()}] state.json corrupt — backed up to ${backup}, starting fresh\n`;
+  try {
+    ensureCdogDir();
+    appendFileSync(CORRUPT_LOG_PATH, msg, 'utf8');
+  } catch { /* ignore */ }
+  try {
+    console.warn(`[cdog] ${msg.trim()}`);
+  } catch { /* ignore */ }
+}
+
+/**
+ * Persist the full state map atomically: write to a temp file in the same
+ * directory, fsync, then rename over the target. POSIX rename is atomic, so a
+ * crash mid-write can never leave a half-written state.json — readers always
+ * see either the old or the complete new file. Temp name carries the pid as
+ * belt-and-suspenders against any path that bypasses the lock. No locking.
+ */
 function saveStateRaw(state: StateMap): void {
   ensureCdogDir();
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + '\n', 'utf8');
+  const json = JSON.stringify(state, null, 2) + '\n';
+  const tmp = `${STATE_PATH}.tmp.${process.pid}`;
+  let fd: number | null = null;
+  try {
+    fd = openSync(tmp, 'wx'); // O_EXCL: fail if a stale temp exists
+    writeSync(fd, json);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = null;
+    renameSync(tmp, STATE_PATH); // atomic replace
+  } catch (e) {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+    throw e;
+  }
 }
 
 /** Load the full state map (empty if missing/corrupt). Public, read-only. */
