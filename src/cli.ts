@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // cdog — Claude Code process manager (tmux + hooks + watcher daemons). v2
 
+import { readFileSync } from 'node:fs';
 import { startCommand, startAll } from './commands/start.js';
 import { stopCommand, stopAll } from './commands/stop.js';
 import { restartCommand, restartAll } from './commands/restart.js';
@@ -16,6 +17,21 @@ import { autoNudgeCommand } from './commands/auto-nudge.js';
 import { runLogWatcher, recoverFromApiErrors } from './logwatcher.js';
 import { runPaneWatcher } from './panewatcher.js';
 import { ALL_KEYWORD } from './types.js';
+
+/** Resolved at startup from the nearest package.json (no hardcoded version). */
+export const VERSION: string = (() => {
+  try {
+    const pkgPath = new URL('../package.json', import.meta.url);
+    return (JSON.parse(readFileSync(pkgPath, 'utf8')).version as string) ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+})();
+
+function printVersion(): never {
+  console.log(VERSION);
+  process.exit(0);
+}
 
 function usage(): never {
   console.log(`cdog — Claude Code process manager
@@ -40,6 +56,7 @@ Usage:
   cdog auto-nudge <enable|disable> <name|all>  Toggle auto-nudge in config (persistent)
   cdog notify [json]                    Internal: process a hook event (stdin or arg)
   cdog init                             Install ~/.cdog/ and wire hooks into ~/.claude
+  cdog --version | -v                   Show version
   cdog help                             Show this help
 
 "all" is a reserved word — no agent may be named "all".
@@ -208,6 +225,10 @@ async function main(): Promise<void> {
     case '--help':
     case '-h':
       usage();
+      break;
+    case '--version':
+    case '-v':
+      printVersion();
       break;
     default:
       console.error(`✗ unknown command: ${cmd}`);
