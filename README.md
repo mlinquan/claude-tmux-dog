@@ -233,6 +233,13 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 | `api_error_auto_compact` | | Log watcher config (always enabled) |
 | `pane_watcher` | | Pane watcher config (always enabled) |
 
+### Log Retention & Update Check
+
+| Field / Env | Default | Description |
+|-------|---------|-------------|
+| `log_retention` (config) | `"7d"` | cdog trims its **own** op-log to this window on `cdog start` and `cdog prune` (by per-line timestamp). claude's debug log is left to claude. `"0"`/`"off"` disables. |
+| `CDOG_NO_UPDATE_CHECK=1` (env) | off | cdog checks the npm registry for a newer version once per day (cached in `~/.cdog/update-check.json`) and prints a non-blocking hint to stderr. Set this env to mute. Never auto-installs. |
+
 ---
 
 ## Recovery Details

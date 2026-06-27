@@ -232,6 +232,13 @@ cdog log
 | `api_error_auto_compact` | | log watcher 配置(始终启用) |
 | `pane_watcher` | | pane watcher 配置(始终启用) |
 
+### 日志保留 & 更新检查
+
+| 字段 / 环境变量 | 默认 | 说明 |
+|-------|---------|-------------|
+| `log_retention` (config) | `"7d"` | cdog 在 `cdog start` 和 `cdog prune` 时按行时间戳裁剪**自己的** op-log 到该窗口。claude 的 debug log 不动(归 claude 自己管)。`"0"`/`"off"` 关闭。 |
+| `CDOG_NO_UPDATE_CHECK=1` (env) | 关 | cdog 每天最多查一次 npm registry 是否有新版(缓存在 `~/.cdog/update-check.json`),有则向 stderr 提示一行。设此环境变量静默。绝不自动安装。 |
+
 ---
 
 ## 恢复细节
