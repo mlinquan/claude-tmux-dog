@@ -14,7 +14,7 @@ import { tmuxHasSession, tmuxChecked, tmuxCapturePane, sleep } from '../util.js'
 import { loadConfig } from '../config.js';
 import { logAgentEvent, logSwallow } from '../logger.js';
 import { isClaudeWorking } from '../recovery.js';
-import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
+import { killLogWatcher, clearQuotaNudge, clearRateLimitFirstAt } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 import type { AgentState, ClaudeStatus } from '../types.js';
 
@@ -82,6 +82,8 @@ export async function stopCommand(name: string): Promise<void> {
 
   killLogWatcher(name);
   killPaneWatcher(name);
+  // User takeover — clear rate_limit storm state + pending quota timer.
+  clearRateLimitFirstAt(name);
   clearQuotaNudge(name);
 
   const session = agent.tmux_session;

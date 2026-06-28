@@ -13,7 +13,6 @@ import { handleStop } from './stop.js';
 import { handleStopFailure } from './stop-failure.js';
 import { handleSessionEnd } from './session-end.js';
 import { handlePreCompact, handlePostCompact } from './compact.js';
-import { clearQuotaNudge } from '../logwatcher.js';
 
 export { readEvent };
 
@@ -46,8 +45,8 @@ export async function notifyCommand(argJson?: string): Promise<void> {
       mutateAgent(agent.name, (a) => {
         a.claude_status = 'running';
       });
-      // Cancel any pending quota nudge — claude is running again
-      clearQuotaNudge(agent.name);
+      // NOTE: no rate_limit storm clearing here. Storm state is cleared only by
+      // stream/tool success (logwatcher) or user takeover (stop/restart/nudge).
       break;
     }
     case 'SessionEnd':

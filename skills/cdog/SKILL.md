@@ -198,7 +198,7 @@ cdog tracks **two independent statuses** per agent:
 `cdog stop` flips to `detached` and (by default) Esc-aborts the in-progress turn; `cdog drain` flips to `detached` without interrupting. Neither kills claude.
 `cdog delete` IS the only command that kills the tmux/claude session.
 
-> **`pending`** (claude) — quota exceeded; cdog broke to shell and is waiting for the quota reset to schedule a nudge. Shown **yellow** in `cdog status`. The scheduled nudge is **cancelled** if the agent recovers first (manual nudge, restart, Stop-hook recovery, Notification).
+> **`pending`** (claude) — quota exceeded; cdog broke to shell and is waiting for the quota reset to schedule a nudge. Shown **yellow** in `cdog status`. The scheduled nudge is **cancelled** only on genuine recovery (a streamed response / tool dispatch — claude actually succeeded again) or user takeover (`cdog stop`/`restart`/`nudge`). It is deliberately NOT cancelled by a plain Stop event (a C-c mid-storm isn't recovery), so the timer survives claude's churn until the reset.
 
 ## Watchdog Auto-Management
 

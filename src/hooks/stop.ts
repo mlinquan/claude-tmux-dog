@@ -15,7 +15,6 @@ import { tmuxHasSession, tmuxSendText, localISO } from '../util.js';
 import { logAgentEvent } from '../logger.js';
 import { notify, notifyInteractive } from '../notify.js';
 import { findBySession, reloadConfig, resolvePrompt } from './shared.js';
-import { clearQuotaNudge } from '../logwatcher.js';
 import { killLogWatcher } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 
@@ -42,6 +41,17 @@ export async function handleStop(ev: StopEvent): Promise<void> {
     return; // don't nudge
   }
 
+  // Quota-exceeded wait: claude_status='pending' means a quota nudge is
+  // scheduled for the reset time. Bail out entirely — DON'T auto-nudge (it
+  // would just trigger 429 churn until reset) and DON'T flip status back to
+  // 'running' (it's genuinely waiting for quota). Let the scheduled quota
+  // timer resume claude at reset time. (Storm state clearing is not done here
+  // at all — only stream/tool success or manual stop/restart/nudge clear it.)
+  if (agent.claude_status === 'pending') {
+    logAgentEvent(agent.name, `Stop → quota nudge pending, not nudging (waiting for reset)`);
+    return;
+  }
+
   if (agent.claude_status !== 'running') {
     logAgentEvent(agent.name, `Stop → claude_status was ${agent.claude_status}, marking running (user-recovered)`);
     mutateAgent(agent.name, (a) => {
@@ -49,8 +59,9 @@ export async function handleStop(ev: StopEvent): Promise<void> {
       a.stop_reason = null;
       a.ended_at = null;
     });
-    // Cancel any pending quota nudge — the agent recovered on its own
-    clearQuotaNudge(agent.name);
+    // NOTE: do NOT clear rate_limit storm state here. A Stop event isn't a
+    // recovery signal (could be a C-c mid-storm). Storm state is cleared only
+    // by stream/tool success (logwatcher) or user takeover (stop/restart/nudge).
   }
 
   const cfg = reloadConfig(agent);

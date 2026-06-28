@@ -1,6 +1,23 @@
 # Changelog
 
-## v0.3.0 (2026-06-28, current)
+## v0.4.0 (2026-06-28)
+
+### Bug Fixes
+- **Rate-limit storm loop** (final): [`[API REQUEST]` no longer clears the two-hit confirmation counter. Root cause: every nudge-triggered request wrote `[API REQUEST]` to the debug log, which matched `SUCCESS_RE` and cleared `rate_limit_first_at` mid-storm, making every 429 look like a fresh first hit. Fix: split `REAL_SUCCESS_RE` (`Stream started` / `tool_dispatch_start`) from the old `SUCCESS_RE`; only real streaming responses clear the counter. `[API REQUEST]` now does nothing to storm state.
+
+### Improvements
+- **Unified clear entry point**: `clearRateLimitFirstAt` is the sole function that clears the two-hit counter. Called only by the logwatcher (on stream/tool success) or by user commands (`stop`/`restart`/`nudge`). Hook events (`Stop`, `SessionStart`) no longer touch it.
+- **Stop hook `pending` guard**: when `claude_status === 'pending'` (quota nudge waiting), `handleStop` returns early — no status rewrite, no auto-nudge, preserving the scheduled quota timer until reset time.
+- **`clearQuotaNudge` scoped down**: no longer clears `rate_limit_first_at`. Only manages the in-memory quota timer and `next_nudge_at` state.
+- **Old no-resetTime two-hit branch removed**: `resetTime`-less 429s fall through to `transientNotifyCount++` (log + notify only) instead of entering a stale double-confirm path.
+
+### Compatibility
+- Fully backward-compatible (no config changes)
+- No breaking changes
+
+---
+
+## v0.3.0 (2026-06-28)
 
 ### Features
 - **`cdog drain`** — graceful detach: let claude finish its current turn before going idle, no Esc interrupt

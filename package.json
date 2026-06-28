@@ -1,6 +1,6 @@
 {
   "name": "claude-tmux-dog",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "24/7 unattended Claude agents + tmux-native message bus. Auto-nudge, auto-recovery, proactive compaction — keep agents running autonomously for days.",
   "type": "module",
   "bin": {

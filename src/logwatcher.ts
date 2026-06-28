@@ -88,6 +88,10 @@ export function parseQuotaResetTime(line: string): Date | null {
 //   "[API REQUEST]"                          → a new request dispatched (claude recovered)
 //   "tool_dispatch_start"                     → tool execution (response was processed)
 export const SUCCESS_RE = /Stream started - received first chunk|\[API REQUEST\]|tool_dispatch_start/;
+// Real recovery signal — only stream/tool count as genuine success for clearing
+// rate_limit storm state. [API REQUEST] fires on every dispatched request including
+// ones that immediately 429, so it must NOT trigger the rate_limit recovery clear.
+export const REAL_SUCCESS_RE = /Stream started - received first chunk|tool_dispatch_start/;
 
 // ---- API error classification ----
 // Different API errors need different recovery strategies:
@@ -443,8 +447,12 @@ export async function runLogWatcher(agentName: string): Promise<void> {
           transientNotifyCount = 0;
           persistCounter(agentName, 0);
         }
-        // Clear rate_limit first-at on recovery (claude self-healed)
-        clearRateLimitFirstAt(agentName);
+        // Real recovery (stream/tool) → clear rate_limit storm state.
+        // [API REQUEST] alone is NOT enough — it fires mid-storm right before a 429.
+        if (REAL_SUCCESS_RE.test(trimmed)) {
+          clearRateLimitFirstAt(agentName);
+          clearQuotaNudge(agentName);
+        }
         continue;
       }
 
@@ -514,57 +522,38 @@ export async function runLogWatcher(agentName: string): Promise<void> {
             handleFatalError(agentName, trimmed).catch(() => {});
             return; // watcher exits after fatal
           }
-          // Check for quota exceeded with reset time → two-hit confirmation
-          // First rate_limit: record timestamp + breakToShell + nudge.
-          // Second rate_limit within confirm window: real quota exceeded → scheduleQuotaNudge.
           if (kind === 'rate_limit') {
             const resetTime = parseQuotaResetTime(trimmed);
             const tmuxSession = currentState?.tmux_session ?? agentName;
             const confirmMinutes = acConfig.rateLimitConfirmMinutes;
             const firstAt = currentState?.rate_limit_first_at ?? null;
 
-            if (!firstAt) {
-              // ── First rate_limit trigger ──
-              rateLimitFirstHit(agentName, tmuxSession, 'no prior record');
-            } else {
-              // ── Non-first rate_limit trigger ──
-              const deltaMs = dayjs().valueOf() - dayjs(firstAt).valueOf();
-              const confirmMs = confirmMinutes * 60_000;
+            // ── 429 + resetTime: two-hit confirmation (high priority) ──
+            // resetTime means the error carries "reset at 2026-06-28 21:34:21"
+            // (AccountQuotaExceeded) — a definitive quota exhaustion signal.
+            // Subsequent 429s may flood in as claude internally retries.
+            if (resetTime) {
+              const deltaMs = firstAt ? dayjs().valueOf() - dayjs(firstAt).valueOf() : Infinity;
+              writeWatcherLog(agentName, `rate_limit with resetTime: firstAt=${firstAt ?? 'null'}, deltaMs=${deltaMs === Infinity ? 'Infinity' : Math.round(deltaMs / 1000) + 's'}, quotaTimers=${quotaTimers.has(agentName)}`);
 
-              if (deltaMs < confirmMs) {
-                // Within confirm window → real quota exceeded
-                writeWatcherLog(agentName, `rate_limit confirmed (delta=${Math.round(deltaMs / 60_000)}min < ${confirmMinutes}min), scheduling quota nudge`);
-                // Clear first_at (for accurate future tracking after recovery)
-                mutateAgent(agentName, (a) => {
-                  a.rate_limit_first_at = null;
-                });
-                if (resetTime) {
-                  // Execute existing logic: breakToShell + mark pending + scheduleQuotaNudge
-                  const schedulePending = (): void => {
-                    mutateAgent(agentName, (a) => {
-                      a.claude_status = 'pending';
-                    });
-                    scheduleQuotaNudge(agentName, resetTime, trimmed);
-                  };
-                  if (tmuxHasSession(tmuxSession)) {
-                    breakToShell(tmuxSession).then(schedulePending).catch(schedulePending);
-                  } else {
-                    schedulePending();
-                  }
-                } else {
-                  // No reset time parsed — just breakToShell + nudge
-                  if (tmuxHasSession(tmuxSession)) {
-                    breakToShell(tmuxSession)
-                      .then(() => nudgeAgentFromWatcher(agentName, tmuxSession))
-                      .catch(() => nudgeAgentFromWatcher(agentName, tmuxSession));
-                  } else {
-                    nudgeAgentFromWatcher(agentName, tmuxSession);
-                  }
-                }
+              // First hit: no record or expired
+              if (firstAt === null || deltaMs >= confirmMinutes * 60_000) {
+                rateLimitFirstHit(agentName, tmuxSession,
+                  firstAt === null ? 'no prior record'
+                    : `delta=${Math.round(deltaMs / 60_000)}min >= ${confirmMinutes}min`);
+              } else if (quotaTimers.has(agentName)) {
+                // Timer already set → skip burst 429s
+                writeWatcherLog(agentName, `rate_limit with resetTime, nudge already scheduled, skipping burst`);
               } else {
-                // Outside confirm window → treat as new first hit
-                rateLimitFirstHit(agentName, tmuxSession, `delta=${Math.round(deltaMs / 60_000)}min >= ${confirmMinutes}min`);
+                // Confirmed — schedule quota nudge
+                writeWatcherLog(agentName, `rate_limit confirmed, scheduling quota nudge`);
+                mutateAgent(agentName, (a) => { a.claude_status = 'pending'; });
+                scheduleQuotaNudge(agentName, resetTime, trimmed);
+                if (tmuxHasSession(tmuxSession)) {
+                  breakToShell(tmuxSession).catch(() => {});
+                }
               }
+              continue;
             }
           }
           // provider / rate_limit → let claude retry.
@@ -602,13 +591,17 @@ function writeWatcherLog(agentName: string, message: string): void {
   } catch { /* best effort */ }
 }
 
-/** Clear rate_limit_first_at from state (on SUCCESS_RE or quota nudge recovery). */
-function clearRateLimitFirstAt(agentName: string): void {
+/**
+ * Clear rate_limit_first_at — the SOLE entry point for clearing the two-hit
+ * counter. Called only on genuine recovery (stream/tool success) or user
+ * takeover (manual stop/restart/nudge). No time-guard: stream/tool never fires
+ * during a quota storm (every request 429s before streaming), so it's a
+ * definitive "storm over" signal.
+ */
+export function clearRateLimitFirstAt(agentName: string): void {
   try {
     mutateAgent(agentName, (a) => {
-      if (a.rate_limit_first_at !== null && a.rate_limit_first_at !== undefined) {
-        a.rate_limit_first_at = null;
-      }
+      a.rate_limit_first_at = null;
     });
   } catch { /* best effort */ }
 }
@@ -642,10 +635,11 @@ function nudgeAgentFromWatcher(agentName: string, tmuxSession: string): void {
  * record timestamp, break to shell, nudge once.
  */
 function rateLimitFirstHit(agentName: string, tmuxSession: string, reason: string): void {
-  writeWatcherLog(agentName, `rate_limit first hit (${reason}), recording timestamp + breakToShell + nudge`);
+  const ts = dayjs().toISOString();
   mutateAgent(agentName, (a) => {
-    a.rate_limit_first_at = dayjs().toISOString();
+    a.rate_limit_first_at = ts;
   });
+  writeWatcherLog(agentName, `rate_limit first hit (${reason}), firstAt=${ts}`);
   if (tmuxHasSession(tmuxSession)) {
     breakToShell(tmuxSession)
       .then(() => nudgeAgentFromWatcher(agentName, tmuxSession))
@@ -708,10 +702,15 @@ async function handleFatalError(agentName: string, errorLine: string): Promise<v
 // Track active quota timers per agent to avoid duplicate scheduling
 const quotaTimers = new Map<string, NodeJS.Timeout>();
 
+// rate_limit_first_at lives in state.json; the sole clearing entry point is
+// clearRateLimitFirstAt (called on stream/tool recovery or user takeover).
+// No longer spuriously cleared by [API REQUEST] or hook events.
+
 /**
- * Cancel a pending quota nudge timer and clear next_nudge_at from state.
- * Called when the agent recovers (manual nudge, model switch, Stop hook) so
- * the scheduled nudge doesn't fire redundantly.
+ * Cancel a pending quota nudge timer + clear next_nudge_at + reset claude_status.
+ * Called only on genuine recovery (stream/tool) or user takeover (manual
+ * stop/restart/nudge). Does NOT touch rate_limit_first_at — that's
+ * clearRateLimitFirstAt's sole job.
  */
 export function clearQuotaNudge(agentName: string): void {
   const timer = quotaTimers.get(agentName);
@@ -722,12 +721,9 @@ export function clearQuotaNudge(agentName: string): void {
   try {
     mutateAgent(agentName, (a) => {
       a.next_nudge_at = null;
-      // If claude was pending (waiting for quota), mark it running again
       if (a.claude_status === 'pending') {
         a.claude_status = 'running';
       }
-      // Clear rate_limit first-at on recovery
-      a.rate_limit_first_at = null;
     });
   } catch { /* best effort */ }
 }

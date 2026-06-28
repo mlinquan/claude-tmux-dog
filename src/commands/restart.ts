@@ -19,7 +19,7 @@ import { logAgentEvent } from '../logger.js';
 import { loadConfig, buildRecoverCommand } from '../config.js';
 import { spawnLogWatcher } from '../logwatcher.js';
 import { spawnPaneWatcher } from '../panewatcher.js';
-import { killLogWatcher, clearQuotaNudge } from '../logwatcher.js';
+import { killLogWatcher, clearQuotaNudge, clearRateLimitFirstAt } from '../logwatcher.js';
 import { killPaneWatcher } from '../panewatcher.js';
 import { detectLiveness } from '../recovery.js';
 import { resolvePrompt } from '../hooks/shared.js';
@@ -53,7 +53,9 @@ export async function restartCommand(name: string): Promise<void> {
   killLogWatcher(name);
   killPaneWatcher(name);
 
-  // Clear stale quota nudge — new watcher process will reschedule if needed
+  // Clear stale rate_limit storm state + quota nudge — new watcher process will
+  // reschedule if needed. User takeover (fresh start).
+  clearRateLimitFirstAt(name);
   clearQuotaNudge(name);
 
   // Detect whether claude is still running inside the pane.
@@ -118,8 +120,7 @@ export async function restartCommand(name: string): Promise<void> {
       a.fatal_error = null;
       a.failed_at = null;
     }
-    // Clear rate_limit first-at (fresh start)
-    a.rate_limit_first_at = null;
+    // rate_limit_first_at already force-cleared above via clearRateLimitFirstAt.
   });
 
   // Respawn watchers
