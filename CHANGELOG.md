@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.0 (2026-06-29)
+
+### Breaking (behavior)
+- **Circuit breaker removed.** Recoverable StopFailures (5xx, overloaded, timeout, unknown, rate_limit) no longer mark the agent `failed` after N retries. They self-heal via claude's own retry, get `/compact`'d on context-full, or are probed by the 5-min stall health-check. Only fatal errors (model offline / auth / billing) suspend the agent.
+- **Fatal = suspend, not kill.** `handleFatalError` no longer `kill-session`s the tmux session — it marks `failed` + `detached` (stops monitoring) and leaves tmux/claude alive for inspection. `cdog restart` resumes. `markFailed` now sets `cdog_status='detached'` everywhere, fixing a latent issue where a `failed` agent was still nudged/compacted by watchers.
+
+### Bug Fixes
+- **5xx no longer mis-routed to nudge loop.** `521`/`500`/`502` etc. are now classified as `provider` (previously fell to `unknown` → 3-count → breakToShell+nudge mid-storm, fighting claude's own retry). `provider` errors are left to claude's retry + the 5-min health-check.
+- **5-min stall health-check catches sustained failures.** The stall watchdog now resets only on real success (`Stream started` / `tool_dispatch_start`), NOT on bare `[API REQUEST]` (which fires mid-storm before a 429/5xx). So a 5xx storm — only `[API REQUEST]`, never a stream — lets the 5-min timer fire and probe once, then re-arm. Each 5-min window → at most one probe.
+
+### Improvements
+- **Context-full → forced /compact.** A StopFailure whose message says "context window limit" (often mislabeled `max_output_tokens`) forces `/compact` instead of nudging — `last_up_tokens` is null in that state, so the token% heuristic used to mis-decide "nudge" and re-fail into the (now-removed) breaker.
+- **Faster C-c settle.** `breakToShell` waits for claude to actually stop working (~150–450ms) instead of polling a fixed 5s for a shell prompt that never appears in claude's TUI.
+- **Per-event sound (`sound_on`).** New `notify.sound_on` overrides sound per event. Master `sound: false` → silent; `sound: true` → each event plays unless muted, with chatty events (`api-error`/`nudge`/`compact`) defaulting to silent so a 24/7 agent doesn't beep all night. `sound_on: { <event>: true/false }` overrides either way.
+- **`compact` notification event.** Auto/manual compacts now fire the `compact` event (with a dedicated sound) instead of the legacy `circuit-breaker` name. `circuit-breaker` is kept in the type for backward compat but no longer triggered.
+- **`cdog restart` auto-inits hooks.** restart now self-checks hook config (like `cdog start` always did) and auto-installs any missing/incomplete hooks. Covers agents created by older cdog versions that didn't install all 7 hooks (e.g. `UserPromptSubmit`) — without it, a nudged agent stayed `waiting` because no hook fired to set it `running`.
+
+---
+
 ## v0.4.1 (2026-06-28)
 
 ### Bug Fixes

@@ -80,11 +80,16 @@ export interface StopConfig {
 }
 
 /** Event types that can trigger a desktop notification + sound. */
+// Notification event names. 'compact' fires on auto/manual /compact triggers.
+// 'circuit-breaker' is a legacy name kept for backward compat with existing
+// user `on` config + the old sound file, but is no longer triggered (the
+// circuit breaker was removed — fatal errors suspend via 'agent-failed').
 export type NotifyEvent =
   | 'agent-started'
   | 'agent-failed'
   | 'agent-recovered'
   | 'api-error'
+  | 'compact'
   | 'circuit-breaker'
   | 'max-run-reached'
   | 'nudge'
@@ -95,12 +100,34 @@ export interface NotifyConfig {
   enabled?: boolean;
   /** Sound language: "default" or "zh". Selects assets/sounds/<lang>/. Default "default". */
   lang?: 'default' | 'zh';
-  /** Play custom sound (afplay) on notification. Default false. */
+  /** Master sound switch. Default false (opt-in). When false, no event plays
+   *  sound unless overridden `true` in `sound_on`. When true, every enabled
+   *  event plays sound unless overridden `false` in `sound_on`. */
   sound?: boolean;
+  /** Per-event sound override. Keys not listed follow the master `sound` flag.
+   *  Useful to mute chatty events (api-error/nudge/compact) while keeping
+   *  critical ones (agent-failed/task-completed) audible. Default: high-frequency
+   *  events (api-error, nudge, compact) are NOT muted by code — set them false
+   *  here if you enable master `sound` and find them noisy. */
+  sound_on?: Partial<Record<NotifyEvent, boolean>>;
   /** Absolute icon path for the notification. Defaults to bundled assets/icon.png. */
   icon?: string;
   /** Per-event enable map. Unlisted events default to true. */
   on?: Partial<Record<NotifyEvent, boolean>>;
+  /**
+   * Custom shell command run alongside each enabled notification. Lets you fan
+   * events out to webhooks, chat clients, or your own script. Run via `sh -c`,
+   * so inline commands and script paths both work. Context is passed as ENV
+   * vars (preferred) AND positional args:
+   *   ENV:   CDOG_AGENT  CDOG_EVENT  CDOG_TITLE  CDOG_MESSAGE
+   *   ARGS:  $1=agent  $2=event  $3=title  $4=message
+   * NEVER interpolates title/message into the command string — only via these
+   * vars — so message text can't break the command (no injection). Best-effort:
+   * a failing/timing-out command is logged but never breaks cdog.
+   */
+  command?: string;
+  /** Seconds before a running `command` is killed. Default 30. */
+  command_timeout?: number;
   /**
    * Interactive mode: when an auto-action is OFF (auto_nudge_stop/auto_restart false),
    * pop a notification with action buttons and BLOCK until the user responds or times out.
@@ -260,7 +287,7 @@ export interface AgentState {
   timeformat?: string;
   /** Epoch ms deadline at which per_watch_duration auto-completes the agent. Reset on start/restart. */
   per_watch_deadline?: number | null;
-  /** Timestamps (epoch ms) of recent StopFailure events, for circuit breaking. */
+  /** Timestamps (epoch ms) of recent StopFailure events, retained for diagnostics. */
   failures?: number[];
   /**
    * Consecutive API error count from claude debug log (log-watcher-driven).

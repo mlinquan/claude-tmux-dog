@@ -82,6 +82,8 @@ describe('logwatcher.ts', () => {
         ['稍后再试', '请稍后再试'],
         ['Concurrent limit exceeded', '429 429 {"error":{"type":"bad_response_status_code","message":"Concurrent limit exceeded (request id: abc)"},"type":"error"}'],
         ['new_api_error model_not_found + no channel', '503 503 {"error":{"code":"model_not_found","message":"No available channel for model deepseek-v4-flash under group glm包月 (distributor)","type":"new_api_error"}}'],
+        ['521 Cloudflare origin down', '521 521 status code (no body)'],
+        ['500 server error', '500 500 Internal Server Error'],
       ];
 
       cases.forEach(([name, line]) => {

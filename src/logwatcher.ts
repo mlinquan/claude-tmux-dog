@@ -135,7 +135,13 @@ export function classifyApiError(line: string): ApiErrorKind {
   if (/rate.?limit|公平使用|frequency|429/i.test(line)) return 'rate_limit';
   // Provider errors: 503, upstream error, overloaded_error (model busy)
   // NOTE: overloaded_error = "该模型当前访问量过大" = provider overloaded, NOT context full
-  if (/503|upstream error|overloaded_error|访问量过大|稍后再试/i.test(line)) return 'provider';
+  // Provider errors: 503, upstream error, overloaded_error (model busy), AND
+  // upstream-5xx status codes (500/502/520-523/525-527). 521 = Cloudflare
+  // "origin is down" — the model provider is unreachable, compact won't help.
+  // Leave it to claude's own retry (don't C-c + nudge mid-storm). The stall
+  // watchdog (5min) backstops: if claude goes silent, it nudges once to retry.
+  // NOTE: 524 is excluded — it's a Cloudflare timeout, handled as 'timeout' below.
+  if (/503|upstream error|overloaded_error|访问量过大|稍后再试|\b(50[02]|52[0-37-9])\b/i.test(line)) return 'provider';
   // Transient timeouts: TTFB, 524 Cloudflare, "Request timed out"
   if (/timed out|524|TTFB|no response headers/i.test(line)) return 'timeout';
   return 'unknown';
@@ -449,15 +455,19 @@ export async function runLogWatcher(agentName: string): Promise<void> {
 
       // Successful API activity → reset ALL counters
       if (SUCCESS_RE.test(trimmed)) {
-        armStallWatchdog(); // real activity → reset stall watchdog
         if (errorCounters.size > 0 || transientNotifyCount > 0) {
           errorCounters.clear();
           transientNotifyCount = 0;
           persistCounter(agentName, 0);
         }
-        // Real recovery (stream/tool) → clear rate_limit storm state.
-        // [API REQUEST] alone is NOT enough — it fires mid-storm right before a 429.
+        // Real activity (stream/tool) resets the stall watchdog AND clears
+        // rate_limit storm state. [API REQUEST] alone does NEITHER — it only
+        // means a request was dispatched, not that it succeeded, so a 5xx storm
+        // (only [API REQUEST], never a stream) must NOT reset the 5min health
+        // timer. This is what lets the stall watchdog catch sustained failures:
+        // no real success for 5min → nudge once to probe.
         if (REAL_SUCCESS_RE.test(trimmed)) {
+          armStallWatchdog(); // real success → reset health timer
           clearRateLimitFirstAt(agentName);
           clearQuotaNudge(agentName);
         }
@@ -675,14 +685,17 @@ async function handleFatalError(agentName: string, errorLine: string): Promise<v
 
   const tmuxSession = state.tmux_session ?? agentName;
 
-  // 1. breakToShell: marker → C-c → check → C-u
+  // 1. breakToShell: marker → C-c → check → C-u (stop claude's retry churn, but
+  //    DON'T kill the tmux session — keep claude/context alive for the user to
+  //    inspect. This is a "suspend", not a kill: mark failed + detach + stop
+  //    watchers, wait for the user to `cdog restart` after fixing the cause.)
   if (tmuxHasSession(tmuxSession)) {
     try {
       await breakToShell(tmuxSession);
     } catch { /* best effort */ }
   }
 
-  // 4. Mark failed with reason
+  // 2. Suspend: mark failed + detach (stop monitoring), keep tmux alive
   try {
     mutateAgent(agentName, (a) => {
       a.claude_status = 'failed';
@@ -694,17 +707,12 @@ async function handleFatalError(agentName: string, errorLine: string): Promise<v
     });
   } catch { /* best effort */ }
 
-  // 5. Kill tmux session
-  if (tmuxHasSession(tmuxSession)) {
-    try { tmux(['kill-session', '-t', tmuxSession]); } catch { /* best effort */ }
-  }
-
-  // 6. Kill pane watcher (this log watcher exits via return)
+  // 3. Kill watchers (this log watcher exits via return); tmux/claude left alive
   killPaneWatcher(agentName);
 
-  // 7. Notify
+  // 4. Notify
   notify(agentName, 'agent-failed', agentName,
-    `FATAL: model offline — ${errorLine}`).catch(() => {});
+    `FATAL: suspended (not killed) — ${errorLine}`).catch(() => {});
 }
 
 // Track active quota timers per agent to avoid duplicate scheduling
@@ -910,7 +918,7 @@ export async function recoverFromApiErrors(agentName: string): Promise<void> {
 
   if (action === 'compact') {
     logAgentEvent(agentName, `recover-from-errors: → /compact (↑ ${upTokens ?? 'unknown'} tokens, max=${acConfig.maxTokens})`);
-    notify(agentName, 'circuit-breaker', agentName, `Auto-compact (↑ ${upTokens ?? 'unknown'} tokens >= ${Math.round(acConfig.maxTokens * 0.8)})`);
+    notify(agentName, 'compact', agentName, `Auto-compact (↑ ${upTokens ?? 'unknown'} tokens >= ${Math.round(acConfig.maxTokens * 0.8)})`);
   } else {
     logAgentEvent(agentName, `recover-from-errors: → nudge "${acConfig.prompt}" (↑ ${upTokens ?? 'unknown'} tokens, max=${acConfig.maxTokens})`);
     notify(agentName, 'nudge', agentName, `Nudged after ${acConfig.threshold} API errors (↑ ${upTokens ?? 'unknown'} tokens, context OK)`);

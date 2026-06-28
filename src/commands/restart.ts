@@ -23,6 +23,7 @@ import { killLogWatcher, clearQuotaNudge, clearRateLimitFirstAt } from '../logwa
 import { killPaneWatcher } from '../panewatcher.js';
 import { detectLiveness } from '../recovery.js';
 import { resolvePrompt } from '../hooks/shared.js';
+import { hooksInstalled, hooksConfigured, installHookScripts, mergeHookSettings } from '../hooks.js';
 
 /**
  * `cdog restart <name>` — re-watch a detached agent.
@@ -57,6 +58,21 @@ export async function restartCommand(name: string): Promise<void> {
   // reschedule if needed. User takeover (fresh start).
   clearRateLimitFirstAt(name);
   clearQuotaNudge(name);
+
+  // Auto-init hooks if missing/incomplete (claude settings can get reset by
+  // updates/other tools, and historical cdog versions didn't install all 7
+  // hooks — e.g. UserPromptSubmit). Without it, a nudged agent stays "waiting"
+  // because no hook fires to set it "running".
+  if (!hooksInstalled() || !hooksConfigured()) {
+    console.log(`⚙ ${name}: hooks missing/incomplete — running cdog init automatically...`);
+    installHookScripts();
+    const ok = mergeHookSettings();
+    if (ok) {
+      console.log('✓ hooks installed and configured');
+    } else {
+      console.warn('⚠ hooks auto-init failed — run `cdog init` manually');
+    }
+  }
 
   // Detect whether claude is still running inside the pane.
   // If it died (e.g. user C-c'd it, pane is now a shell), restart it via --resume.

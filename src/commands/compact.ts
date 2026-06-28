@@ -78,7 +78,7 @@ export async function compactCommand(name?: string): Promise<void> {
   if (action === 'compact') {
     logAgentEvent(name, `compact: → /compact (↑ ${upTokens ?? 'unknown'} tokens, max=${maxTokens})`);
     console.log(`✓ ${name}: /compact (↑ ${upTokens ?? 'unknown'} tokens >= ${Math.round(maxTokens * 0.8)})`);
-    await notify(name, 'circuit-breaker', name, `Manual compact (↑ ${upTokens ?? 'unknown'} tokens)`);
+    await notify(name, 'compact', name, `Manual compact (↑ ${upTokens ?? 'unknown'} tokens)`);
   } else {
     logAgentEvent(name, `compact: → nudge "${prompt}" (↑ ${upTokens ?? 'unknown'} tokens, max=${maxTokens})`);
     console.log(`✓ ${name}: nudge "${prompt}" (↑ ${upTokens ?? 'unknown'} tokens, context OK)`);

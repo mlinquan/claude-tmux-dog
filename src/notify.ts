@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { NotificationCenter } from 'node-notifier';
 import type { NotifyConfig, NotifyEvent } from './types.js';
+import { logAgentEvent } from './logger.js';
 import { loadState } from './state.js';
 import { loadConfig } from './config.js';
 import { buildTerminalClickCommand } from './terminal.js';
@@ -66,6 +67,24 @@ function eventEnabled(cfg: NotifyConfig, event: NotifyEvent): boolean {
   return v !== false;
 }
 
+// Events that default to SILENT even when master `sound` is on — they fire
+// frequently on a 24/7 agent (every Stop nudge, every API error, every compact)
+// and would beep all night. Override with `sound_on: { <event>: true }`.
+const SILENT_BY_DEFAULT = new Set<NotifyEvent>(['api-error', 'nudge', 'compact']);
+
+/**
+ * Should this event play sound? Master `sound` flag is the default; `sound_on`
+ * overrides per event (true → always, false → never). Chatty events
+ * (api-error/nudge/compact) default to silent unless explicitly enabled.
+ */
+export function shouldPlaySound(cfg: NotifyConfig, event: NotifyEvent): boolean {
+  const v = cfg.sound_on?.[event];
+  if (v === true) return true;
+  if (v === false) return false;
+  if (cfg.sound !== true) return false;
+  return !SILENT_BY_DEFAULT.has(event);
+}
+
 /** Play a custom sound via afplay (macOS). No-op on other platforms / missing file. */
 function playSound(lang: string, event: NotifyEvent): void {
   if (process.platform !== 'darwin') return;
@@ -77,6 +96,50 @@ function playSound(lang: string, event: NotifyEvent): void {
   } catch {
     /* best effort */
   }
+}
+
+/**
+ * Run the user's notify.command (best-effort, never throws). Context is passed
+ * ONLY as env/args — never interpolated into the command string — so message
+ * text can't break or inject into the command. Killed after command_timeout so
+ * a hung command can't stall cdog. The child is detached+unref'd so a long-
+ * running webhook won't block the notifying (often hook-spawned, short-lived)
+ * process from exiting.
+ */
+function runCommand(
+  cfg: NotifyConfig,
+  agentName: string,
+  event: NotifyEvent,
+  title: string,
+  message: string,
+): void {
+  const cmd = cfg.command;
+  if (!cmd) return;
+  const timeoutSec = cfg.command_timeout ?? 30;
+  const env = {
+    ...process.env,
+    CDOG_AGENT: agentName,
+    CDOG_EVENT: event,
+    CDOG_TITLE: title,
+    CDOG_MESSAGE: message,
+  };
+  let child: import('node:child_process').ChildProcess;
+  try {
+    child = spawn('sh', ['-c', cmd, 'cdog-notify', agentName, event, title, message], {
+      detached: true,
+      stdio: 'ignore',
+      env,
+    });
+  } catch (e) {
+    try { logAgentEvent(agentName, `notify command spawn failed: ${(e as Error).message}`); } catch { /* ignore */ }
+    return;
+  }
+  child.unref();
+  const timer = setTimeout(() => {
+    try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    try { logAgentEvent(agentName, `notify command timed out after ${timeoutSec}s, killed`); } catch { /* ignore */ }
+  }, timeoutSec * 1000);
+  child.on('exit', () => clearTimeout(timer));
 }
 
 function resolveIcon(cfg: NotifyConfig): string | undefined {
@@ -105,7 +168,8 @@ export function notify(agentName: string, event: NotifyEvent, title: string, mes
       // Click on notification body → open tmux session in Terminal.app.
       const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
       fireNotification(cfg, title, message, false, 0, undefined, undefined, () => {}, executeCmd);
-      if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
+      if (shouldPlaySound(cfg, event)) playSound(cfg.lang ?? 'default', event);
+      runCommand(cfg, agentName, event, title, message);
     } catch {
       /* never break main flow */
     }
@@ -173,7 +237,7 @@ export function notifyInteractive(
         if (cfg && eventEnabled(cfg, event)) {
           const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
           fireNotification(cfg, title, message, false, 0, undefined, undefined, () => {}, executeCmd);
-          if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
+          if (shouldPlaySound(cfg, event)) playSound(cfg.lang ?? 'default', event);
         }
         resolve('timeout');
         return;
@@ -183,7 +247,7 @@ export function notifyInteractive(
         // Non-macOS: no blocking interaction. Plain notify + resolve timeout.
         const executeCmd = openOnClickEnabled(cfg) ? buildExecuteCommand(cfg, agentName) : undefined;
         fireNotification(cfg, title, message, false, 0, undefined, undefined, () => {}, executeCmd);
-        if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
+        if (shouldPlaySound(cfg, event)) playSound(cfg.lang ?? 'default', event);
         resolve('timeout');
         return;
       }
@@ -202,7 +266,7 @@ export function notifyInteractive(
         (choice) => resolve(choice),
         executeCmd,
       );
-      if (cfg.sound === true) playSound(cfg.lang ?? 'default', event);
+      if (shouldPlaySound(cfg, event)) playSound(cfg.lang ?? 'default', event);
     } catch {
       resolve('error');
     }

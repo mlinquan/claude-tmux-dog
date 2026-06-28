@@ -18,7 +18,7 @@ cdog does two things:
 
 No message broker, no external daemon framework — tmux IS the bus.
 
----
+***
 
 ## Why cdog
 
@@ -31,7 +31,7 @@ cdog turns Claude Code into an autonomous agent that runs for days without human
 - **Proactive compaction** — Pane watcher monitors `↑ tokens` in the TUI and compacts at 80% *before* errors happen
 - **Quota-aware** — Detects `AccountQuotaExceeded` with reset time, breaks to shell, and schedules a nudge after the reset
 - **Auto-shutdown** — Set `per_watch_duration: "7d"` and cdog will mark the agent `completed` after 7 days, kill watchers, but keep the tmux session alive (context preserved)
-- **Circuit breaker** — 3 failures in 5 minutes trips the breaker; agent marked `failed` and requires manual restart
+- **Suspend on fatal** — Fatal errors (model offline, auth, billing) suspend the agent (stop monitoring, keep tmux/claude alive) for you to inspect, then `cdog restart` resumes. Recoverable errors never hard-fail: they self-heal via claude's retry or are probed by the `stall_timeout` health-check (default 5m)
 
 **How it works:** Claude Code hooks (`Stop` / `StopFailure` / `SessionStart` / `SessionEnd`) push events to cdog. No polling, no timers, no filesystem watchers — pure event-driven lifecycle management.
 
@@ -71,7 +71,7 @@ Reply Method: cdog message send --to snow-agent --message 'Found N' --from herme
 
 No message broker. No external daemon. tmux IS the bus.
 
----
+***
 
 ## Quick Start
 
@@ -108,7 +108,7 @@ cdog log
 
 That's it — your agent is now running 24/7 in a tmux session, auto-nudging on stops, auto-recovering from errors, auto-compacting before context overflows.
 
----
+***
 
 ## How It Works
 
@@ -124,21 +124,21 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
    - **Log watcher** (reactive): tails debug log, triggers recovery on API error threshold
 5. **`cdog stop`** flips cdog to `detached` and (by default) Esc-aborts the in-progress turn; **`cdog drain`** detaches without interrupting. Neither kills claude — detached cdog still records status from hooks (observe-only). **`cdog delete`** is the only command that kills the tmux session
 
----
+***
 
 ## What cdog Automates For You
 
-| Feature | What it does | Why it matters |
-|---------|--------------|----------------|
-| **Auto-nudge** | Sends prompt on every Stop hook | Agent keeps working without human nudging |
-| **Auto-recovery** | Breaks to shell + compact-or-nudge on API errors | Recovers from transient failures automatically |
-| **Proactive compact** | Monitors tokens, compacts at 80% | Prevents API errors before they happen |
-| **Quota scheduling** | Detects reset time, schedules nudge after quota resets | No wasted retries while quota is zero |
-| **Stall detection** | No activity for 5min → nudge | Breaks stuck loops |
-| **Auto-shutdown** | Marks `completed` after N days, kills watchers, keeps tmux | Long-running tasks eventually stop nudging |
-| **Message bus** | Send text to any agent's pane | Cross-agent coordination without infrastructure |
+| Feature               | What it does                                               | Why it matters                                  |
+| --------------------- | ---------------------------------------------------------- | ----------------------------------------------- |
+| **Auto-nudge**        | Sends prompt on every Stop hook                            | Agent keeps working without human nudging       |
+| **Auto-recovery**     | Breaks to shell + compact-or-nudge on API errors           | Recovers from transient failures automatically  |
+| **Proactive compact** | Monitors tokens, compacts at 80%                           | Prevents API errors before they happen          |
+| **Quota scheduling**  | Detects reset time, schedules nudge after quota resets     | No wasted retries while quota is zero           |
+| **Stall detection**   | No real activity for `stall_timeout` (default 5m) → nudge  | Breaks stuck loops + 5xx health-check           |
+| **Auto-shutdown**     | Marks `completed` after N days, kills watchers, keeps tmux | Long-running tasks eventually stop nudging      |
+| **Message bus**       | Send text to any agent's pane                              | Cross-agent coordination without infrastructure |
 
----
+***
 
 ## Configuration
 
@@ -184,10 +184,28 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
     "enabled": true,
     "lang": "default",
     "sound": true,
+    "sound_on": {
+      "agent-started": true,
+      "agent-failed": true,
+      "agent-recovered": true,
+      "api-error": false,
+      "compact": false,
+      "max-run-reached": true,
+      "nudge": false,
+      "task-completed": true
+    },
     "open_on_click": true,
     "terminal": "Terminal",
+    "command": null,
+    "command_timeout": 30,
     "on": {
+      "agent-started": true,
       "agent-failed": true,
+      "agent-recovered": true,
+      "api-error": true,
+      "compact": true,
+      "max-run-reached": true,
+      "nudge": true,
       "task-completed": true
     }
   }
@@ -196,24 +214,24 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 
 ### Key Fields
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | ✓ | Agent name (unique, cannot be `all`) |
-| `cwd` | ✓ | Working directory (tmux session created here) |
-| `md` | | Task markdown file(s) piped to claude on start |
-| `args` | | Extra CLI flags for claude |
-| `env` | | Env vars injected into the launched claude process, e.g. `{"DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"}`. Prefixed as `K=V` before `claude` (applies to claude only). |
-| `log` | | Claude debug log path (default: `<cwd>/logs/claude-debug.log`) |
-| `log_file` | | cdog operation log path |
-| `watchdog` | | Auto-management policy |
-| `notify` | | Desktop notification settings |
-| `stop` | | `cdog stop` behavior |
+| Field      | Required | Description                                                                                                                                                                                    |
+| ---------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`     | ✓        | Agent name (unique, cannot be `all`)                                                                                                                                                           |
+| `cwd`      | ✓        | Working directory (tmux session created here)                                                                                                                                                  |
+| `md`       | <br />   | Task markdown file(s) piped to claude on start                                                                                                                                                 |
+| `args`     | <br />   | Extra CLI flags for claude                                                                                                                                                                     |
+| `env`      | <br />   | Env vars injected into the launched claude process, e.g. `{"DISABLE_TELEMETRY": "1", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1"}`. Prefixed as `K=V` before `claude` (applies to claude only). |
+| `log`      | <br />   | Claude debug log path (default: `<cwd>/logs/claude-debug.log`)                                                                                                                                 |
+| `log_file` | <br />   | cdog operation log path                                                                                                                                                                        |
+| `watchdog` | <br />   | Auto-management policy                                                                                                                                                                         |
+| `notify`   | <br />   | Desktop notification settings                                                                                                                                                                  |
+| `stop`     | <br />   | `cdog stop` behavior                                                                                                                                                                           |
 
 ### Stop Configuration
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `abort_work` | `true` | On `cdog stop`, when claude is actively working (running/pending), send a single **Esc** to abort the in-progress turn and set status to `waiting` — the claude **process stays alive** (suspend, don't exit). Esc is used instead of `Ctrl+C` so the process can't be accidentally exited; `Ctrl+C` stays reserved for the recovery flow. No-op when claude is idle or the tmux session is gone. Default `true` (`stop` means halt); set `false` to detach without interrupting the current turn. |
+| Field        | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `abort_work` | `true`  | On `cdog stop`, when claude is actively working (running/pending), send a single **Esc** to abort the in-progress turn and set status to `waiting` — the claude **process stays alive** (suspend, don't exit). Esc is used instead of `Ctrl+C` so the process can't be accidentally exited; `Ctrl+C` stays reserved for the recovery flow. No-op when claude is idle or the tmux session is gone. Default `true` (`stop` means halt); set `false` to detach without interrupting the current turn. |
 
 ```json
 {
@@ -225,26 +243,26 @@ That's it — your agent is now running 24/7 in a tmux session, auto-nudging on 
 
 ### Watchdog Configuration
 
-| Field | Default | Description |
-|-------|---------|-------------|
-| `prompt` | `"continue"` | Text sent on each nudge |
-| `per_watch_duration` | | Monitor duration (e.g. `"7d"`, `"4h"`). After this, agent marked `completed`, watchers killed, tmux kept alive |
-| `max_tokens` | `200000` | Max context tokens (`200000`, `"200k"`, `"1m"`) |
-| `auto_nudge_stop` | `false` | Auto-send prompt on Stop hook |
-| `auto_restart` | `true` | Auto-recover on StopFailure |
-| `stall_timeout` | `"5m"` | No activity → nudge after this long |
-| `stall_cooldown` | `"10m"` | Cooldown after stall-triggered nudge |
-| `api_error_auto_compact` | | Log watcher config (always enabled) |
-| `pane_watcher` | | Pane watcher config (always enabled) |
+| Field                    | Default      | Description                                                                                                    |
+| ------------------------ | ------------ | -------------------------------------------------------------------------------------------------------------- |
+| `prompt`                 | `"continue"` | Text sent on each nudge                                                                                        |
+| `per_watch_duration`     | <br />       | Monitor duration (e.g. `"7d"`, `"4h"`). After this, agent marked `completed`, watchers killed, tmux kept alive |
+| `max_tokens`             | `200000`     | Max context tokens (`200000`, `"200k"`, `"1m"`)                                                                |
+| `auto_nudge_stop`        | `false`      | Auto-send prompt on Stop hook                                                                                  |
+| `auto_restart`           | `true`       | Auto-recover on recoverable StopFailure; fatal errors suspend (keep tmux, wait for `cdog restart`)             |
+| `stall_timeout`          | `"5m"`       | No real activity (stream/tool) for this long → nudge. Doubles as the 5xx/overloaded health-check interval      |
+| `stall_cooldown`         | `"10m"`      | Cooldown after stall-triggered nudge                                                                           |
+| `api_error_auto_compact` | <br />       | Log watcher config (always enabled)                                                                            |
+| `pane_watcher`           | <br />       | Pane watcher config (always enabled)                                                                           |
 
 ### Log Retention & Update Check
 
-| Field / Env | Default | Description |
-|-------|---------|-------------|
-| `log_retention` (config) | `"7d"` | cdog trims its **own** op-log to this window on `cdog start` and `cdog prune` (by per-line timestamp). claude's debug log is left to claude. `"0"`/`"off"` disables. |
-| `CDOG_NO_UPDATE_CHECK=1` (env) | off | cdog checks the npm registry for a newer version once per day (cached in `~/.cdog/update-check.json`) and prints a non-blocking hint to stderr. Set this env to mute. Never auto-installs. |
+| Field / Env                    | Default | Description                                                                                                                                                                                |
+| ------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `log_retention` (config)       | `"7d"`  | cdog trims its **own** op-log to this window on `cdog start` and `cdog prune` (by per-line timestamp). claude's debug log is left to claude. `"0"`/`"off"` disables.                       |
+| `CDOG_NO_UPDATE_CHECK=1` (env) | off     | cdog checks the npm registry for a newer version once per day (cached in `~/.cdog/update-check.json`) and prints a non-blocking hint to stderr. Set this env to mute. Never auto-installs. |
 
----
+***
 
 ## Recovery Details
 
@@ -262,13 +280,13 @@ When Claude Code hits an API error, it fires `StopFailure` hook → cdog:
 
 Log watcher tails the debug log, counts consecutive `[ERROR] API error` lines per kind:
 
-| Kind | Threshold | Action |
-|------|-----------|--------|
-| `fatal` | immediate | Stop agent (auth failure, model not found) |
-| `timeout` | 6 | Compact-or-nudge |
-| `provider` | never | Let claude retry (model overloaded, 503) |
-| `rate_limit` | never | Break to shell + scheduled nudge if reset time present |
-| `unknown` | 3 | Compact-or-nudge |
+| Kind         | Threshold | Action                                                 |
+| ------------ | --------- | ------------------------------------------------------ |
+| `fatal`      | immediate | Stop agent (auth failure, model not found)             |
+| `timeout`    | 6         | Compact-or-nudge                                       |
+| `provider`   | never     | Let claude retry (model overloaded, 503)               |
+| `rate_limit` | never     | Break to shell + scheduled nudge if reset time present |
+| `unknown`    | 3         | Compact-or-nudge                                       |
 
 **Fast-path:** if pane watcher recorded `last_up_tokens ≥ 70%`, threshold → 1.
 
@@ -298,26 +316,26 @@ All three paths use the `cdog-recover` marker technique:
 
 This prevents C-c from killing the wrong process.
 
----
+***
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `cdog start [config\|all]` | Start agent(s). Auto-runs `cdog init` if hooks missing |
-| `cdog stop <name\|all>` | Detach cdog + Esc-abort in-progress turn (default). Claude → `waiting`, stays alive |
-| `cdog drain <name\|all>` | Detach cdog **without interrupting** — current turn finishes, then idles |
-| `cdog restart <name\|all>` | Re-watch detached agent. Respawns watchers; kicks if idle |
-| `cdog delete <name\|all>` | Kill tmux session + remove from state |
-| `cdog status [name]` | pm2-style table or detail view |
-| `cdog log [name] [--all\|--cdog\|--claude] [--err]` | Tail logs. `--err` = last N `[ERROR]` lines across whole log |
-| `cdog message send --to <name> --message <text> [--from F] [--reply-method R]` | Send message to agent |
-| `cdog nudge <name\|all> [text]` | Send prompt + Enter |
-| `cdog compact <name>` | Manually trigger compact-or-nudge |
-| `cdog auto-nudge <enable\|disable> <name\|all>` | Toggle auto-nudge (persistent) |
-| `cdog prune [name\|all]` | Trim cdog's own op-log to `log_retention` (default 7d) + clean `~/.cdog`. Auto-runs on `start` |
-| `cdog init` | Install hooks into `~/.claude/settings.json` |
-| `cdog --version` / `-v` | Print version |
+| Command                                                                        | Description                                                                                    |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `cdog start [config\|all]`                                                     | Start agent(s). Auto-runs `cdog init` if hooks missing                                         |
+| `cdog stop <name\|all>`                                                        | Detach cdog + Esc-abort in-progress turn (default). Claude → `waiting`, stays alive            |
+| `cdog drain <name\|all>`                                                       | Detach cdog **without interrupting** — current turn finishes, then idles                       |
+| `cdog restart <name\|all>`                                                     | Re-watch detached agent. Respawns watchers; kicks if idle                                      |
+| `cdog delete <name\|all>`                                                      | Kill tmux session + remove from state                                                          |
+| `cdog status [name]`                                                           | pm2-style table or detail view                                                                 |
+| `cdog log [name] [--all\|--cdog\|--claude] [--err]`                            | Tail logs. `--err` = last N `[ERROR]` lines across whole log                                   |
+| `cdog message send --to <name> --message <text> [--from F] [--reply-method R]` | Send message to agent                                                                          |
+| `cdog nudge <name\|all> [text]`                                                | Send prompt + Enter                                                                            |
+| `cdog compact <name>`                                                          | Manually trigger compact-or-nudge                                                              |
+| `cdog auto-nudge <enable\|disable> <name\|all>`                                | Toggle auto-nudge (persistent)                                                                 |
+| `cdog prune [name\|all]`                                                       | Trim cdog's own op-log to `log_retention` (default 7d) + clean `~/.cdog`. Auto-runs on `start` |
+| `cdog init`                                                                    | Install hooks into `~/.claude/settings.json`                                                   |
+| `cdog --version` / `-v`                                                        | Print version                                                                                  |
 
 ### Dual-Track Status
 
@@ -328,7 +346,7 @@ cdog tracks two independent statuses:
 
 `watching` = cdog auto-nudges/recovers. `detached` = hands-off (no nudge/recover) but still records claude status from hooks (observe-only). `cdog stop`/`drain` → detached; `cdog delete` kills tmux.
 
----
+***
 
 ## Message Relaying
 
@@ -347,7 +365,7 @@ cdog message send --to hermes --message "How's progress?" --from "snow-agent" \
 
 Formatting is purely concatenative — cdog never modifies the text.
 
----
+***
 
 ## Desktop Notifications
 
@@ -367,11 +385,78 @@ Optional macOS Notification Center alerts:
 }
 ```
 
+- `enabled`: Master switch. `false` (default) → no notifications at all. `true` → each event fires unless turned off in `on`.
+- `sound`: Master sound switch. `false` (default) → silent. `true` → each event plays sound unless muted in `sound_on` (chatty events `api-error`/`nudge`/`compact` default to silent).
+- `sound_on`: Per-event sound override. `true` → always play, `false` → never play, unlisted → follow `sound` default (chatty events silent). Example: `"sound_on": { "nudge": true, "agent-failed": false }`.
+- `on`: Per-event notification override. `true` → notify, `false` → skip, unlisted → notify (all on by default).
+- `command`: Shell command run alongside each enabled notification (webhook / chat client / your script). Context via env (`CDOG_AGENT`/`CDOG_EVENT`/`CDOG_TITLE`/`CDOG_MESSAGE`), never interpolated into the command string. See [Custom notify command](#custom-notify-command) below for examples.
+- `command_timeout`: Seconds before a running `command` is killed. Default 30.
 - `open_on_click`: Click notification → open/focus tmux session
 - `lang`: `"default"` (English) or `"zh"` (Chinese)
 - `terminal`: Terminal app for click-to-open (macOS: `"Terminal"`, `"iTerm2"`, `"Ghostty"`, etc.; Linux: `"gnome-terminal"`, `"konsole"`, etc.)
 
----
+**Notification events** (set in `on`; unlisted default to `true`):
+
+| Event             | Fires when                                                                | Sound\*    |
+| ----------------- | ------------------------------------------------------------------------- | ---------- |
+| `agent-started`   | Agent launched via `cdog start`                                           | ✅          |
+| `agent-failed`    | Fatal error → agent suspended (model offline / auth / billing)            | ✅          |
+| `agent-recovered` | Agent recovered after a StopFailure / quota reset / compact               | ✅          |
+| `api-error`       | Any `[ERROR] API error` line in claude's debug log                        | ❌ (chatty) |
+| `compact`         | Context compacted (proactive 80%, auto-recover, or manual `cdog compact`) | ❌ (chatty) |
+| `max-run-reached` | `per_watch_duration` reached → agent marked `completed`                   | ✅          |
+| `nudge`           | Agent nudged (Stop hook auto-nudge, stall health-check, quota reset)      | ❌ (chatty) |
+| `task-completed`  | Agent finished its task                                                   | ✅          |
+
+\* Sound defaults below assume master `sound: true`. `sound_on` overrides per event (see config table). Chatty events (`api-error`/`nudge`/`compact`) default to silent so a 24/7 agent doesn't beep all night; set them `true` in `sound_on` if you want them audible.
+
+### Custom notify command
+
+`notify.command` runs a shell command alongside each enabled notification — fan
+events out to a chat client, webhook, or your own script. It runs via `sh -c`, so
+inline commands and script paths both work. Context is passed as **env vars**
+(preferred) and positional args, never interpolated into the command string, so
+message text can't break the command:
+
+- ENV: `CDOG_AGENT` `CDOG_EVENT` `CDOG_TITLE` `CDOG_MESSAGE`
+- ARGS: `$1`=agent `$2`=event `$3`=title `$4`=message
+
+Best-effort: a failing or timing-out command (default 30s, override with
+`command_timeout`) is logged and never breaks cdog.
+
+```jsonc
+"notify": {
+  "enabled": true,
+  "on": { "agent-failed": true, "task-completed": true },
+  "command": "curl -s \"https://api.telegram.org/bot$TG_TOKEN/sendMessage\" -d chat_id=\"$TG_CHAT\" -d text=\"[$CDOG_AGENT] $CDOG_EVENT: $CDOG_MESSAGE\""
+}
+```
+
+```jsonc
+// Send to a chat client via a natural-language command
+"notify": {
+  "enabled": true,
+  "command": "hermes chat -q \"send \\\"$CDOG_MESSAGE\\\" to my telegram\" -Q"
+}
+```
+
+```jsonc
+// Route to a specific chat/user id
+"notify": {
+  "enabled": true,
+  "command": "openclaw channel send --target 123456 --message \"$CDOG_MESSAGE\""
+}
+```
+
+```jsonc
+// Or just run a script (passing the same env + args)
+"notify": {
+  "enabled": true,
+  "command": "/Users/me/cdog-on-event.sh"
+}
+```
+
+***
 
 ## Caveats
 
@@ -379,9 +464,9 @@ Optional macOS Notification Center alerts:
 - **macOS notifications** — Interactive notifications use macOS Notification Center. Linux falls back to plain notify-send
 - **Hook-based** — Hooks must be installed via `cdog init`. Without them, auto-nudge/recover won't work
 - **Watcher subprocesses** — `cdog start` spawns pane watcher + log watcher as detached children. They're killed on stop/delete/restart via process-group signaling
-- **Circuit breaker** — 3 failures in 5 minutes trips the breaker; agent requires manual restart
+- **No circuit breaker** — Recoverable errors (5xx, overloaded, timeout, unknown) no longer hard-fail after N retries. They self-heal via claude's own retry, get `/compact`'d on context-full, or are probed by the `stall_timeout` health-check (default 5m). Only fatal errors (model offline / auth / billing) suspend the agent
 
----
+***
 
 ## Build from Source
 
@@ -391,13 +476,13 @@ npm run build      # tsc -> dist/
 npm run dev        # run via tsx without building
 ```
 
----
+***
 
 ## Skill Integration
 
 This repo includes a skill at `skills/cdog/`. When `claude-tmux-dog` is installed globally, any AI agent can load this skill to manage cdog agents without leaving the conversation.
 
----
+***
 
 ## Author
 

@@ -31,7 +31,7 @@ cdog 把 Claude Code 变成一个能连续跑几天的自主 agent:
 - **主动压缩** —— Pane watcher 监控 TUI 里的 `↑ tokens`,在 80% 时*提前*压缩,避免错误发生
 - **配额感知** —— 检测到带重置时间的 `AccountQuotaExceeded`,退到 shell,在重置后定时续推
 - **自动关闭** —— 设置 `per_watch_duration: "7d"`,7 天后 cdog 把 agent 标记为 `completed`,杀掉 watcher,但保留 tmux 会话(上下文不丢)
-- **熔断器** —— 5 分钟内 3 次失败触发熔断,agent 标记为 `failed`,需要手动重启
+- **致命挂起** —— 致命错误(模型离线/鉴权/计费)挂起 agent(停监控、保留 tmux/claude)供你排查,`cdog restart` 即可恢复。可恢复错误不再硬失败:靠 claude 自身重试自愈、上下文满则 `/compact`、或由 `stall_timeout` 健康检查探活(默认 5m)
 
 **工作原理:** Claude Code 的 hook(`Stop` / `StopFailure` / `SessionStart` / `SessionEnd`)把事件推给 cdog。没有轮询、没有定时器、没有文件监听——纯事件驱动的生命周期管理。
 
@@ -134,7 +134,7 @@ cdog log
 | **自动恢复** | API 错误 → 退 shell + compact-or-nudge | 自动从瞬态故障中恢复 |
 | **主动压缩** | 监控 token,80% 时压缩 | 在错误发生前预防 |
 | **配额调度** | 检测重置时间,额度恢复后定时续推 | 配额为零时不浪费重试 |
-| **卡死检测** | 5 分钟无活动 → 续推 | 打破卡死的循环 |
+| **卡死检测** | `stall_timeout`(默认 5m)无真实活动 → 续推 | 打破卡死循环 + 5xx 健康检查 |
 | **自动关闭** | N 天后标记 `completed`,杀 watcher,留 tmux | 长任务最终会停止续推 |
 | **消息总线** | 向任意 agent 的 pane 发文本 | 无需基础设施的跨 agent 协作 |
 
@@ -184,10 +184,28 @@ cdog log
     "enabled": true,
     "lang": "zh",
     "sound": true,
+    "sound_on": {
+      "agent-started": true,
+      "agent-failed": true,
+      "agent-recovered": true,
+      "api-error": false,
+      "compact": false,
+      "max-run-reached": true,
+      "nudge": false,
+      "task-completed": true
+    },
     "open_on_click": true,
     "terminal": "Terminal",
+    "command": null,
+    "command_timeout": 30,
     "on": {
+      "agent-started": true,
       "agent-failed": true,
+      "agent-recovered": true,
+      "api-error": true,
+      "compact": true,
+      "max-run-reached": true,
+      "nudge": true,
       "task-completed": true
     }
   }
@@ -231,8 +249,8 @@ cdog log
 | `per_watch_duration` | | 监控时长(如 `"7d"`、`"4h"`)。到期后标记 `completed`,杀 watcher,保留 tmux |
 | `max_tokens` | `200000` | 最大上下文 token(`200000`、`"200k"`、`"1m"`) |
 | `auto_nudge_stop` | `false` | Stop hook 时自动发送 prompt |
-| `auto_restart` | `true` | StopFailure 时自动恢复 |
-| `stall_timeout` | `"5m"` | 无活动超过此时长 → 续推 |
+| `auto_restart` | `true` | 可恢复 StopFailure 自动恢复;致命错误挂起(保留 tmux,等 `cdog restart`) |
+| `stall_timeout` | `"5m"` | 无真实活动(stream/tool)超过此时长 → 续推。兼作 5xx/overloaded 健康检查间隔 |
 | `stall_cooldown` | `"10m"` | 卡死续推后的冷却时间 |
 | `api_error_auto_compact` | | log watcher 配置(始终启用) |
 | `pane_watcher` | | pane watcher 配置(始终启用) |
@@ -367,9 +385,71 @@ cdog message send --to hermes --message "进度如何" --from "snow-agent" \
 }
 ```
 
+- `enabled`:总开关。`false`(默认)→ 完全不通知。`true` → 每个事件都通知,除非在 `on` 关掉。
+- `sound`:声音总开关。`false`(默认)→ 静音。`true` → 每个事件播音,除非在 `sound_on` 静音(高频事件 `api-error`/`nudge`/`compact` 默认静音)。
+- `sound_on`:逐事件声音覆盖。`true` → 总响,`false` → 总不响,未列 → 跟 `sound` 默认(高频事件静音)。例:`"sound_on": { "nudge": true, "agent-failed": false }`。
+- `on`:逐事件通知覆盖。`true` → 通知,`false` → 跳过,未列 → 通知(默认全开)。
+- `command`:每个启用通知旁额外跑的 shell 命令(webhook / 聊天客户端 / 你的脚本)。上下文经环境变量(`CDOG_AGENT`/`CDOG_EVENT`/`CDOG_TITLE`/`CDOG_MESSAGE`)传入,绝不拼进命令串。示例见下方[自定义通知命令](#自定义通知命令)。
+- `command_timeout`:命令运行超时秒数,超时 kill。默认 30。
 - `open_on_click`:点击通知 → 打开/聚焦 tmux 会话
 - `lang`:`"default"`(英文)或 `"zh"`(中文)
 - `terminal`:点击打开的终端 app(macOS:`"Terminal"`、`"iTerm2"`、`"Ghostty"` 等;Linux:`"gnome-terminal"`、`"konsole"` 等)
+
+**通知事件**(在 `on` 中设置;未列出的默认 `true`):
+
+| 事件 | 触发时机 | 声音* |
+|-------|------------|--------|
+| `agent-started` | `cdog start` 启动 agent | ✅ |
+| `agent-failed` | 致命错误 → agent 挂起(模型离线/鉴权/计费) | ✅ |
+| `agent-recovered` | StopFailure / 配额重置 / compact 后恢复 | ✅ |
+| `api-error` | claude debug log 出现 `[ERROR] API error` | ❌(高频) |
+| `compact` | 上下文压缩(主动 80%、自动恢复或手动 `cdog compact`) | ❌(高频) |
+| `max-run-reached` | `per_watch_duration` 到期 → agent 标记 `completed` | ✅ |
+| `nudge` | 续推(Stop hook 自动续推、stall 健康检查、配额重置) | ❌(高频) |
+| `task-completed` | agent 完成任务 | ✅ |
+
+\* 以下声音默认基于总开关 `sound: true`。`sound_on` 可逐事件覆盖(见配置表)。高频事件(`api-error`/`nudge`/`compact`)默认静音,避免 24/7 agent 半夜扰民;需 audible 在 `sound_on` 设 `true`。
+
+### 自定义通知命令
+
+`notify.command` 在每个启用的通知旁额外跑一条 shell 命令——把事件转发到聊天客户端、webhook 或你自己的脚本。经 `sh -c` 执行,行内命令和脚本路径都行。上下文以**环境变量**(首选)和位置参数传入,**绝不拼进命令串**,所以消息文本不会破坏命令:
+
+- ENV:`CDOG_AGENT` `CDOG_EVENT` `CDOG_TITLE` `CDOG_MESSAGE`
+- ARGS:`$1`=agent `$2`=event `$3`=title `$4`=message
+
+尽力而为:命令失败或超时(默认 30s,用 `command_timeout` 覆盖)只会记日志,绝不影响 cdog。
+
+```jsonc
+"notify": {
+  "enabled": true,
+  "on": { "agent-failed": true, "task-completed": true },
+  "command": "curl -s \"https://api.telegram.org/bot$TG_TOKEN/sendMessage\" -d chat_id=\"$TG_CHAT\" -d text=\"[$CDOG_AGENT] $CDOG_EVENT: $CDOG_MESSAGE\""
+}
+```
+
+```jsonc
+// 用自然语言命令发给聊天客户端
+"notify": {
+  "enabled": true,
+  "command": "hermes chat -q \"send \\\"$CDOG_MESSAGE\\\" to my telegram\" -Q"
+}
+```
+
+```jsonc
+// 路由到指定聊天/用户 id
+"notify": {
+  "enabled": true,
+  "command": "openclaw channel send --target 123456 --message \"$CDOG_MESSAGE\""
+}
+```
+
+```jsonc
+// 或者直接跑脚本(同样的 env + 位置参数)
+"notify": {
+  "enabled": true,
+  "command": "/Users/me/cdog-on-event.sh"
+}
+```
 
 ---
 
@@ -379,7 +459,7 @@ cdog message send --to hermes --message "进度如何" --from "snow-agent" \
 - **macOS 通知** —— 交互式通知用 macOS 通知中心。Linux 降级为普通 notify-send
 - **依赖 Hook** —— hook 必须通过 `cdog init` 安装。没有 hook,自动续推/恢复不可用
 - **Watcher 子进程** —— `cdog start` 把 pane watcher + log watcher 作为 detached 子进程启动。stop/delete/restart 通过进程组信号清理
-- **熔断器** —— 5 分钟内 3 次失败触发熔断,agent 需要手动重启
+- **无熔断器** —— 可恢复错误(5xx/overloaded/timeout/unknown)不再 N 次后硬失败:靠 claude 自身重试自愈、上下文满则 `/compact`、或由 `stall_timeout` 健康检查探活(默认 5m)。仅致命错误(模型离线/鉴权/计费)挂起 agent
 
 ---
 

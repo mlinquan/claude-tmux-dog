@@ -280,7 +280,7 @@ function handleTokens(
   }
   logAgentEvent(agentName, `pane-watcher: /compact sent (waiting for PostCompact hook to nudge)`);
 
-  notify(agentName, 'circuit-breaker', agentName,
+  notify(agentName, 'compact', agentName,
     `Proactive compact: ↑ ${upTokens} tokens (${Math.round(upTokens / cfg.maxTokens * 100)}% of ${cfg.maxTokens})`);
 }
 

@@ -50,7 +50,6 @@ import {
   TRANSIENT_ERRORS,
   CONTEXT_SUSPECT_ERRORS,
   CIRCUIT_WINDOW_MS,
-  CIRCUIT_MAX_FAILURES,
 } from './error-types.js';
 
 function logRawStopFailure(name: string, ev: StopFailureEvent): void {
@@ -103,6 +102,10 @@ function markFailed(
   mutateAgent(name, (a) => {
     a.claude_status = 'failed';
     a.stop_reason = 'failed';
+    // Detach on every failure: stop watchers/stall/pane monitoring so a failed
+    // agent isn't nudged/compacted anymore. tmux/claude are left alive (suspend,
+    // not kill) for the user to inspect before `cdog restart`.
+    a.cdog_status = 'detached';
     a.ended_at = localISO();
     a.last_error = errMsg;
     a.failures = failures;
@@ -146,9 +149,13 @@ export async function handleStopFailure(ev: StopFailureEvent): Promise<void> {
   const recoverable = TRANSIENT_ERRORS.has(errorType) || CONTEXT_SUSPECT_ERRORS.has(errorType);
 
   if (FATAL_ERRORS.has(errorType)) {
+    // Fatal → suspend (not kill): markFailed sets failed+detached (watchers
+    // stop), but tmux/claude are left alive for the user to inspect. Same
+    // posture as the logwatcher's handleFatalError. Wait for `cdog restart`
+    // after the cause (model offline / auth / billing) is fixed.
     markFailed(agent.name, errSummary, failures);
-    logAgentEvent(agent.name, `StopFailure → failed (fatal: ${errorType})`);
-    await notify(agent.name, 'agent-failed', agent.name, `Failed (fatal): ${errSummary}`);
+    logAgentEvent(agent.name, `StopFailure → suspended (fatal: ${errorType}, tmux kept alive)`);
+    await notify(agent.name, 'agent-failed', agent.name, `Suspended (fatal): ${errSummary}`);
     return;
   }
 
@@ -174,17 +181,10 @@ export async function handleStopFailure(ev: StopFailureEvent): Promise<void> {
     }
   }
 
-  const circuitTripped = failures.length >= CIRCUIT_MAX_FAILURES;
-  if (circuitTripped) {
-    markFailed(
-      agent.name,
-      `${errSummary} (circuit breaker tripped: ${failures.length} failures in 5m)`,
-      failures,
-    );
-    logAgentEvent(agent.name, `StopFailure → failed (circuit breaker)`);
-    await notify(agent.name, 'circuit-breaker', agent.name, `Circuit breaker tripped: ${failures.length} failures in 5m`);
-    return;
-  }
+  // NOTE: the old "circuit breaker" (>=3 recoverable failures in 5min → failed)
+  // is removed. Recoverable errors now either self-heal (claude's own retry),
+  // get force-compacted (context-overload), or are probed by the 5min stall
+  // health-check — not failed. Only FATAL_ERRORS suspend the agent.
 
   if (isContextOverload(ev)) {
     logAgentEvent(agent.name, `StopFailure → context-overload detected, forcing /compact`);
