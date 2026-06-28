@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.1 (2026-06-28)
+
+### Bug Fixes
+- **Context-full no longer fails the agent**: a StopFailure whose message says "context window limit" (claude often mislabels it `error=max_output_tokens`) now forces `/compact` instead of nudging. Root cause: in that state `last_up_tokens` is null, so the token% heuristic mis-decided "nudge", and nudging a full context re-failed → circuit breaker → `failed`. `isContextOverload` now matches the message text regardless of the error-type field; the context-overload branch calls a new `forceCompact` (never nudge).
+- **Faster C-c settle**: `breakToShell` now waits for claude to actually stop working (`waitForClaudeIdle`, typically ~150–450ms) instead of polling for a shell prompt (`waitForShellPrompt`) that never appears in claude's TUI — the old code burned a fixed ~5s every time. The 5s remains only as a hang-safety ceiling.
+- **Stall watchdog respects /compact**: the 5-min stall nudge is now suppressed while `compact_in_progress` is set, closing a latent risk of C-c'ing a long-running compact.
+
+### Improvements
+- Spinner detection (`isClaudeWorking`) covers two more frames claude rotates through (`✢`, `✽`); `·` deliberately excluded (status-bar separator, would false-positive). The primary `… (` timer signal already covers all working states regardless of spinner char.
+
+---
+
 ## v0.4.0 (2026-06-28)
 
 ### Bug Fixes

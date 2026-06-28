@@ -212,6 +212,7 @@ async function runPollMode(agentName: string, session: string, cfg: ResolvedPane
  * /compact. The PostCompact hook handler in notify.ts sends the nudge when
  * claude reports compaction is done — no hardcoded delays.
  */
+
 function handleTokens(
   agentName: string,
   session: string,

@@ -368,11 +368,19 @@ export async function runLogWatcher(agentName: string): Promise<void> {
         return;
       }
       lastStallAt = now;
+      const cs = loadState()[agentName];
+      // Suppress while a /compact is in flight — claude is legitimately busy
+      // summarizing context (can take minutes on a large context), and C-c'ing
+      // it would abort the compact. Re-arm and wait for PostCompact.
+      if (cs?.compact_in_progress) {
+        writeWatcherLog(agentName, `stall timer fired but /compact in progress — suppressing nudge, re-arming`);
+        armStallWatchdog();
+        return;
+      }
       // Cross-check with the pane watcher: if it recorded real token activity
       // (last_up_tokens_at) within the stall window, Claude IS working — the
       // debug-log tail is likely blind (e.g. rotation), not actually stalled.
       // Suppress the nudge so we don't interrupt real work, and re-arm.
-      const cs = loadState()[agentName];
       if (cs) {
         const lastTokensAt = cs.last_up_tokens_at ? dayjs(cs.last_up_tokens_at).valueOf() : 0;
         const tokenAge = now - lastTokensAt;

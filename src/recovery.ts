@@ -99,27 +99,33 @@ export function detectLiveness(tmuxSession: string): Liveness {
 }
 
 /**
- * Poll tmux pane until a shell prompt ($, %, #) appears. Returns true if prompt seen.
+ * Poll tmux pane until claude stops working (C-c actually landed) — the real
+ * "interrupt took effect" signal. Returns as soon as claude goes idle, which is
+ * typically 1–2 polls (~150–450ms). timeoutMs is only a hang-safety ceiling.
+ *
+ * Why not wait for a shell prompt: in cdog's case claude is always the
+ * foreground app, so a `$ % #` prompt only appears if claude exited. Waiting
+ * for that meant polling the full timeout every time claude stayed alive.
+ * "claude stopped working" is both faster and a more accurate cue that the
+ * interrupt landed — and it makes the input line (with the marker) visible for
+ * the subsequent markerInPane check.
  */
-export async function waitForShellPrompt(session: string, timeoutMs: number): Promise<boolean> {
+export async function waitForClaudeIdle(session: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const pane = tmuxCapturePane(session, 10);
-    const lastLine = pane.split('\n').filter(Boolean).pop() ?? '';
-    if (/[$%#]\s*$/.test(lastLine)) return true;
-    await sleep(200);
+    await sleep(150);
+    if (!claudeIsWorking(session)) return;
   }
-  return false;
 }
 
 /**
- * Break out of claude's error state to a clean shell prompt, safely.
+ * Break out of claude's error state to a clean input line, safely.
  *
  * Uses the cdog-recover marker technique to avoid killing the wrong process:
  *
  *   1. Type the marker text (RECOVER_MARKER) into the input line WITHOUT Enter.
  *   2. Send C-c.
- *   3. Wait for shell prompt.
+ *   3. Wait for claude to stop working (confirms C-c landed).
  *   4. Check if marker survived in the pane:
  *      - marker present → claude was interrupted, marker text left behind → C-u to clear.
  *      - marker gone    → shell was foreground, C-c already cleared the input line → done.
@@ -134,8 +140,8 @@ export async function breakToShell(session: string, timeoutMs = 5000): Promise<b
   // 2. Send C-c to break out of the error state
   tmuxSendKey(session, 'C-c');
 
-  // 3. Wait for shell prompt to confirm C-c took effect
-  await waitForShellPrompt(session, timeoutMs);
+  // 3. Wait for claude to stop working — confirms C-c took effect
+  await waitForClaudeIdle(session, timeoutMs);
 
   // 4. marker survived → claude was interrupted, marker text left in pane → C-u to clear
   //    marker gone    → shell was foreground, C-c cleared the input line → nothing to do
@@ -190,7 +196,13 @@ export function parsePaneTokens(paneContent: string): { upTokens: number | null 
  *      the timer renders).
  */
 const WORKING_TIMER_RE = /…\s*\(/;
-const WORKING_SPINNER_RE = /[✻✶✳✺✦❋✸✷][^\n]*…/;
+// Spinner chars claude's TUI rotates through (observed: ✻ ✶ ✳ ✺ ✦ ❋ ✸ ✷ ✢ ✽).
+// Note: this is the BACKUP signal — the primary "… (" timer regex above catches
+// every working state regardless of spinner char. This set only covers the brief
+// moment the spinner renders before the timer. "·" (middle dot) is deliberately
+// excluded: it's claude's separator in the status bar, too common to be a safe
+// spinner trigger.
+const WORKING_SPINNER_RE = /[✻✶✳✺✦❋✸✷✢✽][^\n]*…/;
 export function isClaudeWorking(paneContent: string): boolean {
   return WORKING_TIMER_RE.test(paneContent) || WORKING_SPINNER_RE.test(paneContent);
 }
@@ -258,4 +270,21 @@ export function compactOrNudge(
   // Context is fine OR unknown → nudge (safer than compacting blindly)
   tmuxSendText(session, prompt, true);
   return { action: 'nudge', upTokens, maxTokens };
+}
+
+/**
+ * Force /compact regardless of token count. Use when we have a DEFINITIVE
+ * "context full" signal (e.g. a StopFailure whose message says "context window
+ * limit") — in that state `last_up_tokens` is usually null, so compactOrNudge's
+ * token% heuristic mis-decides "nudge", and nudging a full context just re-fails.
+ * Sets compact_in_progress + sends /compact; the PostCompact hook sends the
+ * nudge once claude finishes compacting.
+ */
+export function forceCompact(session: string, prompt: string, agentName: string): void {
+  mutateAgent(agentName, (a) => {
+    a.compact_in_progress = true;
+    a.compact_sent_at = new Date().toISOString();
+    a.compact_pending_prompt = prompt;
+  });
+  tmuxSendText(session, COMPACT_INDICATOR, true);
 }

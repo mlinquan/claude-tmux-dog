@@ -205,7 +205,7 @@ cdog tracks **two independent statuses** per agent:
 Configured in `cdog.json`:
 
 - `auto_nudge_stop: true` — on Stop hook, auto-send "continue" so it keeps working
-- `auto_restart: true` — on recoverable StopFailure (rate_limit, overloaded, timeout), auto-run breakToShell + compactOrNudge (compact if context ≥ 80%, else nudge). Circuit breaker trips after 3 failures in 5 min
+- `auto_restart: true` — on recoverable StopFailure (rate_limit, overloaded, timeout), auto-run breakToShell + compactOrNudge (compact if context ≥ 80%, else nudge). A definitive context-full signal (StopFailure message "context window limit", often mislabeled `max_output_tokens`) forces `/compact` regardless of token% — nudging a full context just re-fails. Circuit breaker trips after 3 failures in 5 min
 - `per_watch_duration: "7d"` — stores deadline timestamp; each start/restart resets it; on Stop/SessionEnd, if deadline passed, marks `completed`, kills watchers, keeps tmux alive
 - `max_tokens: "1m"` — max context tokens (accepts `200000`, `"200k"`, `"1m"`). Shared by pane_watcher and api_error_auto_compact
 - `api_error_auto_compact` — log watcher: tails claude debug log, classifies API errors (`fatal`/`timeout`/`provider`/`rate_limit`/`unknown`), triggers compact-or-nudge on threshold. `fatal` (model_not_found etc.) stops agent immediately. Always enabled

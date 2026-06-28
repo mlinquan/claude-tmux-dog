@@ -42,6 +42,7 @@ import {
   breakToShell,
   detectLiveness,
   compactOrNudge,
+  forceCompact,
 } from '../recovery.js';
 import { findBySession, reloadConfig, resolvePrompt } from './shared.js';
 import {
@@ -67,12 +68,16 @@ function logRawStopFailure(name: string, ev: StopFailureEvent): void {
 }
 
 function isContextOverload(ev: StopFailureEvent): boolean {
+  const msg = typeof ev.last_assistant_message === 'string' ? ev.last_assistant_message : '';
+  // "context window limit" is the definitive full-context signal — and claude
+  // often mislabels it (e.g. error=max_output_tokens with this message), so
+  // match on the message text regardless of the error type field.
+  if (msg.includes('context window limit')) return true;
   return (
     (ev.error === 'unknown' || ev.error === 'invalid_request') &&
-    typeof ev.last_assistant_message === 'string' &&
-    (ev.last_assistant_message.includes('Request timed out') ||
-      ev.last_assistant_message.includes('timed out') ||
-      ev.last_assistant_message.length > 100_000)
+    (msg.includes('Request timed out') ||
+      msg.includes('timed out') ||
+      msg.length > 100_000)
   );
 }
 
@@ -182,36 +187,32 @@ export async function handleStopFailure(ev: StopFailureEvent): Promise<void> {
   }
 
   if (isContextOverload(ev)) {
-    logAgentEvent(agent.name, `StopFailure → context-overload detected. Checking last_up_tokens...`);
+    logAgentEvent(agent.name, `StopFailure → context-overload detected, forcing /compact`);
 
     const session = agent.tmux_session;
     if (tmuxHasSession(session) && detectLiveness(session) !== 'dead') {
+      // Context is definitively full — force /compact. Do NOT use compactOrNudge
+      // here: in this state last_up_tokens is usually null, so the token%
+      // heuristic would mis-decide "nudge", and nudging a full context just
+      // re-triggers the same failure (→ circuit breaker → failed).
       await breakToShell(session, 3000);
-      const maxTokens = cfg?.watchdog?.max_tokens
-        ? parseTokenCount(cfg.watchdog.max_tokens)
-        : 200_000;
       const prompt = resolvePrompt(cfg);
-      const { action, upTokens } = compactOrNudge(session, maxTokens, prompt, agent.name);
-
-      if (action === 'compact') {
-        logAgentEvent(agent.name, `StopFailure context-overload: → /compact (↑ ${upTokens ?? 'unknown'} tokens >= ${Math.round(maxTokens * 0.8)})`);
-        const nextRestart = (agent.restart_count ?? 0) + 1;
-        mutateAgent(agent.name, (a) => {
-          a.claude_status = 'running';
-          a.stop_reason = null;
-          a.ended_at = null;
-          a.last_error = errSummary;
-          a.last_restart_at = localISO();
-          a.restart_count = nextRestart;
-          a.failures = failures;
-        });
-        await notify(agent.name, 'agent-recovered', agent.name, `Context-overload → /compact (↑ ${upTokens ?? 'unknown'} tokens) #${nextRestart}`);
-        return;
-      }
-      logAgentEvent(agent.name, `StopFailure context-overload: → nudge (↑ ${upTokens ?? 'unknown'} tokens < ${Math.round(maxTokens * 0.8)}), normal recovery`);
-    } else {
-      logAgentEvent(agent.name, 'StopFailure context-overload: session dead, fall through to normal recovery');
+      forceCompact(session, prompt, agent.name);
+      const nextRestart = (agent.restart_count ?? 0) + 1;
+      mutateAgent(agent.name, (a) => {
+        a.claude_status = 'running';
+        a.stop_reason = null;
+        a.ended_at = null;
+        a.last_error = errSummary;
+        a.last_restart_at = localISO();
+        a.restart_count = nextRestart;
+        a.failures = failures;
+      });
+      logAgentEvent(agent.name, `StopFailure context-overload: → forced /compact #${nextRestart}`);
+      await notify(agent.name, 'agent-recovered', agent.name, `Context-overload → forced /compact #${nextRestart}`);
+      return;
     }
+    logAgentEvent(agent.name, 'StopFailure context-overload: session dead, fall through to normal recovery');
   }
 
   const session = agent.tmux_session;
